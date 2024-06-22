@@ -10,3 +10,5 @@ tmp/
 **/checkpoints/
 *.png
 **/.DS_Store
+
+.idea/

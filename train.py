@@ -16,13 +16,13 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import get_scheduler
 
-from molscribe.dataset import TrainDataset, AuxTrainDataset, bms_collate
-from molscribe.model import Encoder, Decoder
-from molscribe.loss import Criterion
-from molscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
+from polymerscribe.dataset import TrainDataset, AuxTrainDataset, bms_collate
+from polymerscribe.model import Encoder, Decoder
+from polymerscribe.loss import Criterion
+from polymerscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
     print_rank_0, format_df
-from molscribe.chemistry import convert_graph_to_smiles, postprocess_smiles, keep_main_molecule
-from molscribe.tokenizer import get_tokenizer
+from polymerscribe.chemistry import convert_graph_to_smiles, postprocess_smiles, keep_main_molecule
+from polymerscribe.tokenizer import get_tokenizer
 from evaluate import SmilesEvaluator
 
 import warnings

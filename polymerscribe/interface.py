@@ -23,11 +23,11 @@ def safe_load(module, module_states):
     return
 
 
-class MolScribe:
+class PolymerScribe:
 
     def __init__(self, model_path, device=None, num_workers=1):
         """
-        MolScribe Interface
+        PolymerScribe Interface
         :param model_path: path of the model checkpoint.
         :param device: torch device, defaults to be CPU.
         :param multiprocessing_enabled: uses multiprocessing to parallelize parts of the inference when enabled, defaults to False.

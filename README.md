@@ -40,9 +40,10 @@ python setup.py install
 ### Example
 Download the MolScribe checkpoint from [HuggingFace Hub](https://huggingface.co/yujieq/MolScribe/tree/main) 
 and predict molecular structures:
+
 ```python
 import torch
-from molscribe import MolScribe
+from polymerscribe import MolScribe
 from huggingface_hub import hf_hub_download
 
 ckpt_path = hf_hub_download('yujieq/MolScribe', 'swin_base_char_aux_1m.pth')
@@ -62,7 +63,7 @@ The output is a dictionary, with the following format
 }
 ```
 
-Please refer to [`molscribe/interface.py`](molscribe/interface.py) and [`notebook/predict.ipynb`](notebook/predict.ipynb) 
+Please refer to [`molscribe/interface.py`](polymerscribe/interface.py) and [`notebook/predict.ipynb`](notebook/predict.ipynb) 
 for details and other available APIs.
 
 For development or reproducing the experiments, please follow the instructions below.
@@ -113,7 +114,7 @@ wget -P ckpts https://huggingface.co/yujieq/MolScribe/resolve/main/swin_base_cha
 ```
 python predict.py --model_path ckpts/swin_base_char_aux_1m680k.pth --image_path assets/example.png
 ```
-MolScribe prediction interface is in [`molscribe/interface.py`](molscribe/interface.py).
+MolScribe prediction interface is in [`molscribe/interface.py`](polymerscribe/interface.py).
 See python script [`predict.py`](predict.py) or jupyter notebook [`notebook/predict.ipynb`](notebook/predict.ipynb)
 for example usage.
 

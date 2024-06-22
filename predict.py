@@ -1,7 +1,7 @@
 import argparse
 import json
 import torch
-from molscribe import MolScribe
+from polymerscribe import PolymerScribe
 
 import warnings 
 warnings.filterwarnings('ignore')
@@ -16,7 +16,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = torch.device('cuda')
-    model = MolScribe(args.model_path, device)
+    model = PolymerScribe(args.model_path, device)
     output = model.predict_image_file(
         args.image_path, return_atoms_bonds=args.return_atoms_bonds, return_confidence=args.return_confidence)
     for key, value in output.items():

@@ -1,15 +1,15 @@
 from distutils.core import setup
 from pathlib import Path
 
-setup(name='MolScribe',
+setup(name='PolymerScribe',
       version='1.1.1',
-      description='MolScribe',
+      description='PolymerScribe',
       author='Yujie Qian',
       author_email='yujieq@csail.mit.edu',
-      url='https://github.com/thomas0809/MolScribe',
-      packages=['molscribe', 'molscribe.indigo', 'molscribe.inference', 'molscribe.transformer'],
-      package_dir={'molscribe': 'molscribe'},
-      package_data={'molscribe': ['vocab/*']},
+      url='https://github.com/zhengkaitu/PolymerScribe',
+      packages=['polymerscribe', 'polymerscribe.indigo', 'polymerscribe.inference', 'polymerscribe.transformer'],
+      package_dir={'polymerscribe': 'polymerscribe'},
+      package_data={'polymerscribe': ['vocab/*']},
       python_requires='>=3.7',
       setup_requires=['numpy'],
       install_requires=[
