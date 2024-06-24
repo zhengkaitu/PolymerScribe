@@ -22,18 +22,37 @@ PolymerScribe
 - data/
   - polyBERT_len85_0.csv
   - polyBERT_len85_0/
-    - polyBERT_len85_0_0.svg
-    - polyBERT_len85_0_1.svg
-    - ...
+    - svg/
+      - polyBERT_len85_0_0.svg
+      - polyBERT_len85_0_1.svg
+      - ...
 ```
 
-Then with the environment activated, run
+Then submit the preprocessing script with
 ```shell
-(polymerscribe) $ python preprocess_for_polybert.py
+sh scripts/submit_preprocess_polybert_image2seq_baseline_20k.sh
 ```
 
-This would tokenize the BigSMILES in the .csv and save in a new .csv under `data/`, suffixed with `_tokenized`. Meanwhile, a vocab based on the tokenized BigSMILES will be created and saved as `polymerscribe/vocab/vocab_polybert.json`.
+This would tokenize the BigSMILES in the .csv and save in a new .csv under `data/`, suffixed with `_tokenized`. The `.svg` would also be rasterized as `.png`. Meanwhile, a vocab based on the tokenized BigSMILES will be created and saved as `polymerscribe/vocab/vocab_polybert.json`. The populated repo would look like
 
+```shell
+PolymerScribe
+- polymerscribe/
+  - vocab/
+    - vocab_polybert.json
+  ...
+- data/
+  - polyBERT_len85_0.csv
+  - polyBERT_len85_0/
+    - svg/
+      - polyBERT_len85_0_0.svg
+      - polyBERT_len85_0_1.svg
+      - ...
+    - png/
+      - polyBERT_len85_0_0.png
+      - polyBERT_len85_0_1.png
+      - ...
+```
 
 -----------
 # Original README for MolScribe
