@@ -1,4 +1,42 @@
-# MolScribe
+# PolymerScribe
+
+This is the experimental repository for PolymerScribe, an image-to-graph model that translates a polymer image to its graph structure, and subsequently to the BigSMILES representation. It also includes a baseline image-to-seq model that directly translates an image to BigSMILES.
+
+# Environment setup on supercloud
+
+```shell
+$ module load anaconda/2023b    # if not already loaded upon login
+$ conda create -y -n polymerscribe python=3.9
+$ conda activate polymerscribe
+$ mkdir /state/partition1/user/$USER
+$ export TMPDIR=/state/partition1/user/$USER
+$ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
+$ pip install -r requirements.txt
+```
+
+# Data and preprocessing
+Put the csv and the images under `data/`, e.g.,
+```shell
+PolymerScribe
+- polymerscribe/
+- data/
+  - polyBERT_len85_0.csv
+  - polyBERT_len85_0/
+    - polyBERT_len85_0_0.svg
+    - polyBERT_len85_0_1.svg
+    - ...
+```
+
+Then with the environment activated, run
+```shell
+(polymerscribe) $ python preprocess_for_polybert.py
+```
+
+This would tokenize the BigSMILES in the .csv and save in a new .csv under `data/`, suffixed with `_tokenized`. Meanwhile, a vocab based on the tokenized BigSMILES will be created and saved as `polymerscribe/vocab/vocab_polybert.json`.
+
+
+-----------
+# Original README for MolScribe
 
 This is the repository for MolScribe, an image-to-graph model that translates a molecular image to its chemical
 structure. Try our [demo](https://huggingface.co/spaces/yujieq/MolScribe) on HuggingFace!
