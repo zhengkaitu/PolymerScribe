@@ -19,8 +19,8 @@ torchrun \
     --valid_file "$VALID_FILE" \
     --test_file "$TEST_FILE" \
     --vocab_file "$VOCAB_FILE" \
-    --formats atom_tok \
-    --dynamic_indigo --augment --mol_augment \
+    --formats atomtok \
+    --augment --mol_augment \
     --include_condensed \
     --coord_bins 64 --sep_xy \
     --input_size 384 \

@@ -22,7 +22,7 @@ torchrun \
     --test_file "$TEST_FILE" \
     --vocab_file "$VOCAB_FILE" \
     --formats chartok_coords,edges \
-    --dynamic_indigo --augment --mol_augment \
+    --augment --mol_augment \
     --include_condensed \
     --coord_bins 64 --sep_xy \
     --input_size 384 \
