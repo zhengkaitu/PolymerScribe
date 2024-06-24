@@ -568,6 +568,29 @@ def get_chemdraw_data(args):
     return train_df, valid_df, test_df, aux_df, tokenizer
 
 
+def get_polybert_data(args):
+    train_df, valid_df, test_df, aux_df = None, None, None, None
+    if args.do_train:
+        train_files = args.train_file.split(',')
+        train_df = pd.concat([pd.read_csv(os.path.join(args.data_path, file)) for file in train_files])
+        print_rank_0(f'train.shape: {train_df.shape}')
+        if args.aux_file:
+            aux_df = pd.read_csv(os.path.join(args.data_path, args.aux_file))
+            print_rank_0(f'aux.shape: {aux_df.shape}')
+    if args.do_train or args.do_valid:
+        valid_df = pd.read_csv(os.path.join(args.data_path, args.valid_file))
+        valid_df.attrs['file'] = args.valid_file
+        print_rank_0(f'valid.shape: {valid_df.shape}')
+    if args.do_test:
+        test_files = args.test_file.split(',')
+        test_df = [pd.read_csv(os.path.join(args.data_path, file)) for file in test_files]
+        for file, df in zip(test_files, test_df):
+            df.attrs['file'] = file
+            print_rank_0(file + f' test.shape: {df.shape}')
+    tokenizer = get_tokenizer(args)
+    return train_df, valid_df, test_df, aux_df, tokenizer
+
+
 def main():
     args = get_args()
     seed_torch(seed=args.seed)
@@ -585,7 +608,8 @@ def main():
     args.edges = any([f in args.formats for f in ['atomtok_coords', 'chartok_coords']])
     print_rank_0('Output formats: ' + ' '.join(args.formats))
 
-    train_df, valid_df, test_df, aux_df, tokenizer = get_chemdraw_data(args)
+    # train_df, valid_df, test_df, aux_df, tokenizer = get_chemdraw_data(args)
+    train_df, valid_df, test_df, aux_df, tokenizer = get_polybert_data(args)
 
     if args.do_train:
         train_loop(args, train_df, valid_df, aux_df, tokenizer, args.save_path)

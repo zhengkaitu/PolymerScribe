@@ -334,7 +334,9 @@ class TrainDataset(Dataset):
             self.file_paths = df['file_path'].values
             if not self.file_paths[0].startswith(args.data_path):
                 self.file_paths = [os.path.join(args.data_path, path) for path in df['file_path']]
-        self.smiles = df['SMILES'].values if 'SMILES' in df.columns else None
+        # self.smiles = df['SMILES'].values if 'SMILES' in df.columns else None
+        self.smiles = df["tokenized_bigsmiles"].values
+
         self.formats = args.formats
         self.labelled = (split == 'train')
         if self.labelled:
@@ -439,7 +441,9 @@ class TrainDataset(Dataset):
                 smiles = self.smiles[idx]
                 if 'atomtok' in self.formats:
                     max_len = FORMAT_INFO['atomtok']['max_len']
-                    label = self.tokenizer['atomtok'].text_to_sequence(smiles, False)
+                    # label = self.tokenizer['atomtok'].text_to_sequence(smiles, False)
+                    # For polyBERT we've pre-tokenized using regex in the csv
+                    label = self.tokenizer['atomtok'].text_to_sequence(smiles, tokenized=True)
                     ref['atomtok'] = torch.LongTensor(label[:max_len])
                 if 'atomtok_coords' in self.formats:
                     if coords is not None:
