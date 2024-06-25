@@ -54,6 +54,12 @@ PolymerScribe
       - ...
 ```
 
+# Training
+Submit the single-GPU training script with
+```shell
+sh scripts/submit_train_polybert_image2seq_baseline_20k.sh
+```
+
 -----------
 # Original README for MolScribe
 
