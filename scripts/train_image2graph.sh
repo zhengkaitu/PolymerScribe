@@ -2,8 +2,8 @@
 source /etc/profile
 
 module load anaconda/2023b
-module load cuda/11.6
-module load nccl/2.11.4-cuda11.6
+module load cuda/11.8
+module load nccl/2.18.1-cuda11.8
 source activate polymerscribe
 
 mkdir -p "$SAVE_PATH"

@@ -597,7 +597,8 @@ def main():
 
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    args.local_rank = int(os.environ['LOCAL_RANK'])
+    args.local_rank = int(os.environ["LOCAL_RANK"]) if os.environ.get("LOCAL_RANK") else -1
+    print_rank_0(f"local rank: {args.local_rank}")
     if args.local_rank != -1:
         dist.init_process_group(backend=args.backend, init_method='env://', timeout=datetime.timedelta(0, 14400))
         torch.cuda.set_device(args.local_rank)

@@ -422,10 +422,17 @@ class TrainDataset(Dataset):
             return idx, image, ref
         else:
             file_path = self.file_paths[idx]
-            image = cv2.imread(file_path)
-            if image is None:
+
+            # rework logic for non-existent file and empty image
+            if os.path.isfile(str(file_path)):
+                image = cv2.imread(file_path)
+            else:
                 image = np.array([[[255., 255., 255.]] * 10] * 10).astype(np.float32)
-                print(file_path, 'not found!')
+            # print(f"image: {image}, shape: {image.shape}")
+            # if image is None:
+            #     image = np.array([[[255., 255., 255.]] * 10] * 10).astype(np.float32)
+            #     print(file_path, 'not found!')
+
             if self.coords_df is not None:
                 h, w, _ = image.shape
                 coords = np.array(eval(self.coords_df.loc[idx, 'node_coords']))
@@ -437,6 +444,7 @@ class TrainDataset(Dataset):
             else:
                 image = self.image_transform(image)
                 coords = None
+                # print(f"transformed image: {image}, shape: {image.shape}")
             if self.labelled:
                 smiles = self.smiles[idx]
                 if 'atomtok' in self.formats:
@@ -445,6 +453,9 @@ class TrainDataset(Dataset):
                     # For polyBERT we've pre-tokenized using regex in the csv
                     label = self.tokenizer['atomtok'].text_to_sequence(smiles, tokenized=True)
                     ref['atomtok'] = torch.LongTensor(label[:max_len])
+
+                    # print(f"smiles: {smiles}")
+                    # print(f"label: {label}")
                 if 'atomtok_coords' in self.formats:
                     if coords is not None:
                         self._process_atomtok_coords(idx, ref, smiles, coords, mask_ratio=0)
