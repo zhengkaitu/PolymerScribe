@@ -1,10 +1,9 @@
 albumentations @ git+https://github.com/albumentations-team/albumentations@37e714fd2e326f6f88778e425f98c2de8c8d5372
 cairosvg==2.7.1
 huggingface-hub==0.28.1
-jupyterlab==4.3.5
-matplotlib==3.10.0
-numpy==1.19.5
-opencv-python==4.5.5.64
+matplotlib==3.9.4
+numpy==1.26.4
+opencv-python==4.8.0.74
 OpenNMT-py==2.2.0
 pandas==2.2.3
 rdkit==2024.9.4
@@ -12,3 +11,4 @@ SmilesPE==0.0.3
 tensorboardX==2.6.2
 timm @ git+https://github.com/rwightman/pytorch-image-models.git@54a6cca27a9a3e092a07457f5d56709da56e3cf5
 transformers==4.5.1
+packaging==21.3

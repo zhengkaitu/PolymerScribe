@@ -1,32 +1,21 @@
-# MolScribe
+# PolymerScribe
 
-This is the repository for MolScribe, an image-to-graph model that translates a molecular image to its chemical
-structure. Try our [demo](https://huggingface.co/spaces/yujieq/MolScribe) on HuggingFace!
-
-![MolScribe](assets/model.png)
-
-If you use MolScribe in your research, please cite our [paper](https://pubs.acs.org/doi/10.1021/acs.jcim.2c01480).
-```
-@article{
-    MolScribe,
-    title = {{MolScribe}: Robust Molecular Structure Recognition with Image-to-Graph Generation},
-    author = {Yujie Qian and Jiang Guo and Zhengkai Tu and Zhening Li and Connor W. Coley and Regina Barzilay},
-    journal = {Journal of Chemical Information and Modeling},
-    publisher = {American Chemical Society ({ACS})},
-    doi = {10.1021/acs.jcim.2c01480},
-    year = 2023,
-}
-```
-
-Please check out our subsequent works on parsing chemical diagrams:
-- [RxnScribe](https://github.com/thomas0809/RxnScribe) (reaction diagram parsing):
-[paper](https://pubs.acs.org/doi/10.1021/acs.jcim.3c00439),
-[code](https://github.com/thomas0809/RxnScribe), [demo](https://huggingface.co/spaces/yujieq/RxnScribe)
-- [OpenChemIE](https://github.com/CrystalEye42/OpenChemIE) (information extraction toolkit for chemistry literature): [paper](https://pubs.acs.org/doi/10.1021/acs.jcim.4c00572), [code](https://github.com/CrystalEye42/OpenChemIE), [demo](https://mit.openchemie.info)
+This is the repository for PolymerScribe, an image-to-graph model that translates a polymer image to its chemical
+structure, and subsequently to BigSMILES.
 
 ## Quick Start
 
-### Installation
+### Environment setup
+
+```shell
+$ conda create -y -n polymerscribe python=3.9
+$ conda activate polymerscribe
+$ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
+$ pip install -r requirements.txt
+```
+
+
+-------------------------
 Option 1: Install MolScribe with pip
 ```
 pip install MolScribe
