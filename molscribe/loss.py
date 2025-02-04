@@ -73,7 +73,7 @@ class GraphLoss(nn.Module):
 
     def __init__(self):
         super(GraphLoss, self).__init__()
-        weight = torch.ones(7) * 10
+        weight = torch.ones(9) * 10
         weight[0] = 1
         self.criterion = nn.CrossEntropyLoss(weight, ignore_index=-100)
 

@@ -127,7 +127,7 @@ def load_states(args, load_path):
     return states
 
 
-def safe_load(module, module_states):
+def safe_load(module, module_states) -> None:
     def remove_prefix(state_dict):
         return {k.replace('module.', ''): v for k, v in state_dict.items()}
 
@@ -136,7 +136,43 @@ def safe_load(module, module_states):
         print_rank_0('Missing keys: ' + str(missing_keys))
     if unexpected_keys:
         print_rank_0('Unexpected keys: ' + str(unexpected_keys))
-    return
+
+
+def safe_load_with_shape_change(module, module_states) -> None:
+    def remove_prefix(state_dict):
+        return {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+    # missing_keys, unexpected_keys = module.load_state_dict(remove_prefix(module_states), strict=False)
+    # if missing_keys:
+    #     print_rank_0('Missing keys: ' + str(missing_keys))
+    # if unexpected_keys:
+    #     print_rank_0('Unexpected keys: ' + str(unexpected_keys))
+
+    new_state_dict = module.state_dict()
+    pretrained_state_dict = remove_prefix(module_states)
+
+    mlp_2_w = new_state_dict["decoder.edges.mlp.2.weight"]
+    mlp_2_b = new_state_dict["decoder.edges.mlp.2.bias"]
+    # print(f"Initial mlp_2_b: {mlp_2_b}")
+
+    mlp_2_w[:7] = pretrained_state_dict["decoder.edges.mlp.2.weight"]
+    mlp_2_b[:7] = pretrained_state_dict["decoder.edges.mlp.2.bias"]
+    # print(f"mlp_2_b after loading pretrained: {mlp_2_b}")
+
+    new_state_dict = pretrained_state_dict
+    new_state_dict["decoder.edges.mlp.2.weight"] = mlp_2_w
+    new_state_dict["decoder.edges.mlp.2.bias"] = mlp_2_b
+    # print(f"mlp_2_b to be loaded into the new module: {mlp_2_b}")
+
+    module.load_state_dict(new_state_dict)
+
+    # new_model = model(...)  # construct the new model
+    # new_sd = new_model.state_dict()  # take the "default" state_dict
+    # pre_trained_sd = torch.load(file)  # load the old version pre-trained weights
+    # # merge information from pre_trained_sd into new_sd
+    # # ...
+    # # after merging the state dict you can load it:
+    # new_model.load_state_dict(new_sd)
 
 
 def get_model(args, tokenizer, device, load_path=None):
@@ -148,7 +184,8 @@ def get_model(args, tokenizer, device, load_path=None):
     if load_path:
         states = load_states(args, load_path)
         safe_load(encoder, states['encoder'])
-        safe_load(decoder, states['decoder'])
+        # safe_load(decoder, states['decoder'])
+        safe_load_with_shape_change(decoder, states['decoder'])
         # print_rank_0(f"Model loaded from {load_path}")
     encoder.to(device)
     decoder.to(device)
@@ -265,7 +302,7 @@ def valid_fn(valid_loader, encoder, decoder, tokenizer, device, args):
     predictions = {}
     start = end = time.time()
     # Inference is distributed. The batch is divided and run independently on multiple GPUs, and the predictions
-    # are gathered afterwards.
+    # are gathered afterward.
     for step, (indices, images, refs) in enumerate(valid_loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -288,14 +325,15 @@ def valid_fn(valid_loader, encoder, decoder, tokenizer, device, args):
                 data_time=data_time,
                 sum_data_time=asMinutes(data_time.sum),
                 remain=timeSince(start, float(step + 1) / len(valid_loader))))
-    # gather predictions from different GPUs
-    gathered_preds = [None for i in range(dist.get_world_size())]
-    dist.all_gather_object(gathered_preds, predictions)
-    n = len(valid_loader.dataset)
-    predictions = [{}] * n
-    for preds in gathered_preds:
-        for idx, pred in preds.items():
-            predictions[idx] = pred
+    # # gather predictions from different GPUs
+    # gathered_preds = [None for i in range(dist.get_world_size())]
+    # dist.all_gather_object(gathered_preds, predictions)
+    # n = len(valid_loader.dataset)
+    # predictions = [{}] * n
+    # for preds in gathered_preds:
+    #     for idx, pred in preds.items():
+    #         predictions[idx] = pred
+
     return predictions
 
 
@@ -565,6 +603,31 @@ def get_chemdraw_data(args):
             df.attrs['file'] = file
             print_rank_0(file + f' test.shape: {df.shape}')
     tokenizer = get_tokenizer(args)
+
+    return train_df, valid_df, test_df, aux_df, tokenizer
+
+
+def get_si_data(args):
+    train_df, valid_df, test_df, aux_df = None, None, None, None
+    if args.do_train:
+        train_files = args.train_file.split(',')
+        train_df = pd.concat([pd.read_csv(os.path.join(args.data_path, file)) for file in train_files])
+        print_rank_0(f'train.shape: {train_df.shape}')
+        if args.aux_file:
+            aux_df = pd.read_csv(os.path.join(args.data_path, args.aux_file))
+            print_rank_0(f'aux.shape: {aux_df.shape}')
+    if args.do_train or args.do_valid:
+        valid_df = pd.read_csv(os.path.join(args.data_path, args.valid_file))
+        valid_df.attrs['file'] = args.valid_file
+        print_rank_0(f'valid.shape: {valid_df.shape}')
+    if args.do_test:
+        test_files = args.test_file.split(',')
+        test_df = [pd.read_csv(os.path.join(args.data_path, file)) for file in test_files]
+        for file, df in zip(test_files, test_df):
+            df.attrs['file'] = file
+            print_rank_0(file + f' test.shape: {df.shape}')
+    tokenizer = get_tokenizer(args)
+
     return train_df, valid_df, test_df, aux_df, tokenizer
 
 
@@ -574,7 +637,7 @@ def main():
 
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    args.local_rank = int(os.environ['LOCAL_RANK'])
+    args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if args.local_rank != -1:
         dist.init_process_group(backend=args.backend, init_method='env://', timeout=datetime.timedelta(0, 14400))
         torch.cuda.set_device(args.local_rank)
@@ -585,7 +648,8 @@ def main():
     args.edges = any([f in args.formats for f in ['atomtok_coords', 'chartok_coords']])
     print_rank_0('Output formats: ' + ' '.join(args.formats))
 
-    train_df, valid_df, test_df, aux_df, tokenizer = get_chemdraw_data(args)
+    # train_df, valid_df, test_df, aux_df, tokenizer = get_chemdraw_data(args)
+    train_df, valid_df, _, aux_df, tokenizer = get_si_data(args)
 
     if args.do_train:
         train_loop(args, train_df, valid_df, aux_df, tokenizer, args.save_path)

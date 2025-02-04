@@ -515,12 +515,17 @@ class TrainDataset(Dataset):
                 edges = torch.zeros((n, n), dtype=torch.long)
                 for u, v, t in edge_list:
                     if u < n and v < n:
+                        edges[u, v] = t
                         if t <= 4:
-                            edges[u, v] = t
                             edges[v, u] = t
-                        else:
-                            edges[u, v] = t
-                            edges[v, u] = 11 - t
+                        elif t == 5:
+                            edges[v, u] = 6
+                        elif t == 6:
+                            edges[v, u] = 5
+                        elif t == 7:
+                            edges[v, u] = 8
+                        elif t == 8:
+                            edges[v, u] = 7
                 ref['edges'] = edges
             else:
                 ref['edges'] = torch.ones(len(indices), len(indices), dtype=torch.long) * (-100)

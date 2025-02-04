@@ -240,6 +240,7 @@ class TransformerDecoderAR(TransformerDecoderBase):
 
     # adapted from onmt.decoders.transformer
     def map_state(self, fn):
+        # FIXME: port the changes from G2S if needed
         def _recursive_map(struct, batch_dim=0):
             for k, v in struct.items():
                 if v is not None:
@@ -257,9 +258,13 @@ class GraphPredictor(nn.Module):
     def __init__(self, decoder_dim, coords=False):
         super(GraphPredictor, self).__init__()
         self.coords = coords
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
+        #     nn.Linear(decoder_dim, 7)
+        # )
         self.mlp = nn.Sequential(
             nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
-            nn.Linear(decoder_dim, 7)
+            nn.Linear(decoder_dim, 9)
         )
         if coords:
             self.coords_mlp = nn.Sequential(
@@ -300,8 +305,14 @@ def get_edge_prediction(edge_prob):
             edge_prob[i][j][6] = (edge_prob[i][j][6] + edge_prob[j][i][5]) / 2
             edge_prob[j][i][5] = edge_prob[i][j][6]
             edge_prob[j][i][6] = edge_prob[i][j][5]
+
+            edge_prob[i][j][7] = (edge_prob[i][j][7] + edge_prob[j][i][8]) / 2
+            edge_prob[i][j][8] = (edge_prob[i][j][8] + edge_prob[j][i][7]) / 2
+            edge_prob[j][i][7] = edge_prob[i][j][8]
+            edge_prob[j][i][8] = edge_prob[i][j][7]
     prediction = np.argmax(edge_prob, axis=2).tolist()
     score = np.max(edge_prob, axis=2).tolist()
+
     return prediction, score
 
 
