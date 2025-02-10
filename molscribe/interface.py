@@ -13,7 +13,7 @@ from .chemistry import convert_graph_to_smiles
 from .tokenizer import get_tokenizer
 
 
-BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge"]
+BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge", "open", "closed"]
 
 
 def safe_load(module, module_states):
@@ -141,6 +141,8 @@ class MolScribe:
                                 bond_dict["confidence"] = pred["edge_scores"][i][j]
                             bond_list.append(bond_dict)
                 pred_dict["bonds"] = bond_list
+                pred_dict["edges"] = pred["edges"]
+                pred_dict["edge_scores"] = pred["edge_scores"]
             outputs.append(pred_dict)
         return outputs
 

@@ -405,4 +405,6 @@ class Decoder(nn.Module):
                                                           predictions[i]['edge_score_product']
                         predictions[i][atom_format].pop('average_token_score')
                         predictions[i].pop('edge_score_product')
+                    predictions[i]['edge_scores'] = edge_score
+
         return predictions
