@@ -19,6 +19,7 @@ python train.py \
     --train_file si_mol/single_bracket_train.csv \
     --valid_file si_mol/single_bracket_val.csv \
     --vocab_file molscribe/vocab/vocab_chars.json \
+    --coords_file train_file \
     --formats chartok_coords,edges \
     --coord_bins 64 --sep_xy \
     --input_size 384 \
@@ -27,7 +28,7 @@ python train.py \
     --load_path $LOAD_PATH \
     --encoder_lr 4e-4 \
     --decoder_lr 4e-4 \
-    --save_path $SAVE_PATH --save_mode last --load_ckpt last \
+    --save_path $SAVE_PATH --save_mode last \
     --label_smoothing 0.1 \
     --epochs 50 \
     --batch_size $((BATCH_SIZE / NUM_GPUS_PER_NODE / ACCUM_STEP)) \
