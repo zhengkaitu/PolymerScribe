@@ -235,6 +235,12 @@ def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decod
     encoder_grad_norm = decoder_grad_norm = 0
 
     for step, (indices, images, refs) in enumerate(train_loader):
+        # print(indices)
+        # for k, v in refs.items():
+        #     print(k)
+        #     print(v)
+        # exit(0)
+
         # measure data loading time
         data_time.update(time.time() - end)
         images = images.to(device)
@@ -290,9 +296,10 @@ def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decod
     return loss_meter.epoch.avg, global_step
 
 
-def valid_fn(valid_loader, encoder, decoder, tokenizer, device, args):
+def valid_fn(valid_loader, encoder, decoder, criterion, tokenizer, device, args):
     batch_time = AverageMeter()
     data_time = AverageMeter()
+    loss_meter = LossMeter()
     # switch to evaluation mode
     if hasattr(decoder, 'module'):
         encoder = encoder.module
@@ -307,22 +314,35 @@ def valid_fn(valid_loader, encoder, decoder, tokenizer, device, args):
         # measure data loading time
         data_time.update(time.time() - end)
         images = images.to(device)
+        batch_size = images.size(0)
         with torch.cuda.amp.autocast(enabled=args.fp16):
             with torch.no_grad():
                 features, hiddens = encoder(images, refs)
+                results = decoder(features, hiddens, refs)
+                losses = criterion(results, refs)
+                loss = sum(losses.values())
+
                 batch_preds  = decoder.decode(features, hiddens, refs)
+
+        # record loss
+        loss_meter.update(loss, losses, batch_size)
+        if args.gradient_accumulation_steps > 1:
+            loss = loss / args.gradient_accumulation_steps
+
         for idx, preds in zip(indices, batch_preds):
             predictions[idx] = preds
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
         if step % args.print_freq == 0 or step == (len(valid_loader) - 1):
+            loss_str = ' '.join([f'{k}:{v.avg:.4f}' for k, v in loss_meter.subs.items()])
             print_rank_0('EVAL: [{0}/{1}] '
                          'Data {data_time.avg:.3f}s ({sum_data_time}) '
                          'Elapsed {remain:s} '
+                         'Loss: {loss.avg:.4f} ({loss_str}) '
             .format(
                 step, len(valid_loader), batch_time=batch_time,
-                data_time=data_time,
+                data_time=data_time, loss=loss_meter, loss_str=loss_str,
                 sum_data_time=asMinutes(data_time.sum),
                 remain=timeSince(start, float(step + 1) / len(valid_loader))))
     # # gather predictions from different GPUs
@@ -413,9 +433,10 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             encoder_scheduler, decoder_scheduler, scaler, device, global_step, SUMMARY, args)
 
         # eval
-        scores = inference(args, valid_df, tokenizer, encoder, decoder, save_path, split='valid')
+        # scores = inference(args, valid_df, criterion, tokenizer, encoder, decoder, save_path, split='valid')
+        scores = inference(args, valid_df, criterion, tokenizer, encoder, decoder, save_path, split='train')
 
-        if args.local_rank != 0:
+        if args.local_rank > 0:
             continue
 
         elapsed = time.time() - start_time
@@ -448,12 +469,12 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             for key in scores:
                 SUMMARY.add_scalar(f'valid/{key}', scores[key], global_step)
 
-        if score >= best_score:
-            best_score = score
-            print_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
-            torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
-            with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
-                json.dump(scores, f)
+        # if score >= best_score:
+        #     best_score = score
+        #     print_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
+        #     torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
+        #     with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
+        #         json.dump(scores, f)
 
         if args.save_mode == 'all':
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_ep{epoch}.pth'))
@@ -464,7 +485,7 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
         dist.barrier()
 
 
-def inference(args, data_df, tokenizer, encoder=None, decoder=None, save_path=None, split='test'):
+def inference(args, data_df, criterion, tokenizer, encoder=None, decoder=None, save_path=None, split='test'):
     print_rank_0("========== inference ==========")
     print_rank_0(data_df.attrs['file'])
 
@@ -492,10 +513,12 @@ def inference(args, data_df, tokenizer, encoder=None, decoder=None, save_path=No
         if args.load_path is None:
             args.load_path = save_path
         encoder, decoder = get_model(args, tokenizer, device, args.load_path)
-    predictions = valid_fn(dataloader, encoder, decoder, tokenizer, device, args)
+    predictions = valid_fn(dataloader, encoder, decoder, criterion, tokenizer, device, args)
 
+    # FIXME: pass string-level evaluation for now
+    return {}
     # The evaluation and saving prediction is only performed in the master process.
-    if args.local_rank != 0:
+    if args.local_rank > 0:
         return
     print('Start evaluation')
 
