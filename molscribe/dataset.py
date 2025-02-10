@@ -349,7 +349,8 @@ class TrainDataset(Dataset):
         # self.fix_transform = A.Compose([A.Transpose(p=1), A.VerticalFlip(p=1)])
         self.dynamic_indigo = (dynamic_indigo and split == 'train')
         if self.labelled and not dynamic_indigo and args.coords_file is not None:
-            if args.coords_file == 'aux_file':
+            # if args.coords_file == 'aux_file':
+            if args.coords_file in ["train_file", "aux_file"]:
                 self.coords_df = df
                 self.pseudo_coords = True
             else:
