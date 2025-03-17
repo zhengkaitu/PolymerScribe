@@ -412,27 +412,42 @@ class TrainDataset(Dataset):
                 ref['atomtok'] = torch.LongTensor(label[:max_len])
             if 'edges' in self.formats and 'atomtok_coords' not in self.formats and 'chartok_coords' not in self.formats:
                 ref['edges'] = torch.tensor(graph['edges'])
-            if 'atomtok_coords' in self.formats:
-                self._process_atomtok_coords(idx, ref, smiles, graph['coords'], graph['edges'],
-                                             mask_ratio=self.args.mask_ratio)
             if 'chartok_coords' in self.formats:
                 self._process_chartok_coords(idx, ref, smiles, graph['coords'], graph['edges'],
                                              mask_ratio=self.args.mask_ratio)
             return idx, image, ref
         else:
+            cond = (idx == 0)
+            cond = False
+
             file_path = self.file_paths[idx]
             image = cv2.imread(file_path)
             if image is None:
                 image = np.array([[[255., 255., 255.]] * 10] * 10).astype(np.float32)
-                print(file_path, 'not found!')
+                if cond: print(file_path, 'not found!')
             if self.coords_df is not None:
+                if cond: print(f"idx: {idx}")
                 h, w, _ = image.shape
-                coords = np.array(eval(self.coords_df.loc[idx, 'node_coords']))
+                if cond: print(f"shape: h {h}, w {w}")
+
+                node_coords = np.array(eval(self.coords_df.loc[idx, 'node_coords']))
+                bracket_coords = np.array(eval(self.coords_df.loc[idx, 'bracket_coords']))
+                if cond: print(f"raw coords: {node_coords}")
+                coords = np.concatenate((node_coords, bracket_coords), axis=0)
+
                 if self.pseudo_coords:
                     coords = normalize_nodes(coords)
+                    if cond: print(f"normalized: {coords}")
                 coords[:, 0] = coords[:, 0] * w
                 coords[:, 1] = coords[:, 1] * h
+                if cond: print(f"rescaled: {coords}")
+
                 image, coords = self.image_transform(image, coords, renormalize=self.pseudo_coords)
+
+                # FIXME: here we abuse the notation a bit to keep only the node coords
+                coords = coords[:len(node_coords)]
+                # if cond: exit(0)
+
             else:
                 image = self.image_transform(image)
                 coords = None
@@ -442,11 +457,6 @@ class TrainDataset(Dataset):
                     max_len = FORMAT_INFO['atomtok']['max_len']
                     label = self.tokenizer['atomtok'].text_to_sequence(smiles, False)
                     ref['atomtok'] = torch.LongTensor(label[:max_len])
-                if 'atomtok_coords' in self.formats:
-                    if coords is not None:
-                        self._process_atomtok_coords(idx, ref, smiles, coords, mask_ratio=0)
-                    else:
-                        self._process_atomtok_coords(idx, ref, smiles, mask_ratio=1)
                 if 'chartok_coords' in self.formats:
                     if coords is not None:
                         self._process_chartok_coords(idx, ref, smiles, coords, mask_ratio=0)
@@ -454,44 +464,9 @@ class TrainDataset(Dataset):
                         self._process_chartok_coords(idx, ref, smiles, mask_ratio=1)
             if self.args.predict_coords and ('atomtok_coords' in self.formats or 'chartok_coords' in self.formats):
                 smiles = self.smiles[idx]
-                if 'atomtok_coords' in self.formats:
-                    self._process_atomtok_coords(idx, ref, smiles, mask_ratio=1)
                 if 'chartok_coords' in self.formats:
                     self._process_chartok_coords(idx, ref, smiles, mask_ratio=1)
             return idx, image, ref
-
-    def _process_atomtok_coords(self, idx, ref, smiles, coords=None, edges=None, mask_ratio=0):
-        max_len = FORMAT_INFO['atomtok_coords']['max_len']
-        tokenizer = self.tokenizer['atomtok_coords']
-        if smiles is None or type(smiles) is not str:
-            smiles = ""
-        label, indices = tokenizer.smiles_to_sequence(smiles, coords, mask_ratio=mask_ratio)
-        ref['atomtok_coords'] = torch.LongTensor(label[:max_len])
-        indices = [i for i in indices if i < max_len]
-        ref['atom_indices'] = torch.LongTensor(indices)
-        if tokenizer.continuous_coords:
-            if coords is not None:
-                ref['coords'] = torch.tensor(coords)
-            else:
-                ref['coords'] = torch.ones(len(indices), 2) * -1.
-        if edges is not None:
-            ref['edges'] = torch.tensor(edges)[:len(indices), :len(indices)]
-        else:
-            if 'edges' in self.df.columns:
-                edge_list = eval(self.df.loc[idx, 'edges'])
-                n = len(indices)
-                edges = torch.zeros((n, n), dtype=torch.long)
-                for u, v, t in edge_list:
-                    if u < n and v < n:
-                        if t <= 4:
-                            edges[u, v] = t
-                            edges[v, u] = t
-                        else:
-                            edges[u, v] = t
-                            edges[v, u] = 11 - t
-                ref['edges'] = edges
-            else:
-                ref['edges'] = torch.ones(len(indices), len(indices), dtype=torch.long) * (-100)
 
     def _process_chartok_coords(self, idx, ref, smiles, coords=None, edges=None, mask_ratio=0):
         max_len = FORMAT_INFO['chartok_coords']['max_len']
@@ -523,30 +498,13 @@ class TrainDataset(Dataset):
                             edges[v, u] = 6
                         elif t == 6:
                             edges[v, u] = 5
-                        elif t == 7:
-                            edges[v, u] = 8
-                        elif t == 8:
-                            edges[v, u] = 7
+                        # elif t == 7:
+                        #     edges[v, u] = 8
+                        # elif t == 8:
+                        #     edges[v, u] = 7
                 ref['edges'] = edges
             else:
                 ref['edges'] = torch.ones(len(indices), len(indices), dtype=torch.long) * (-100)
-
-
-class AuxTrainDataset(Dataset):
-
-    def __init__(self, args, train_df, aux_df, tokenizer):
-        super().__init__()
-        self.train_dataset = TrainDataset(args, train_df, tokenizer, dynamic_indigo=args.dynamic_indigo)
-        self.aux_dataset = TrainDataset(args, aux_df, tokenizer, dynamic_indigo=False)
-
-    def __len__(self):
-        return len(self.train_dataset) + len(self.aux_dataset)
-
-    def __getitem__(self, idx):
-        if idx < len(self.train_dataset):
-            return self.train_dataset[idx]
-        else:
-            return self.aux_dataset[idx - len(self.train_dataset)]
 
 
 def pad_images(imgs):
@@ -564,7 +522,7 @@ def pad_images(imgs):
     return torch.stack(stack)
 
 
-def bms_collate(batch):
+def polymer_collate(batch):
     ids = []
     imgs = []
     batch = [ex for ex in batch if ex[1] is not None]

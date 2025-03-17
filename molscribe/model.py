@@ -263,16 +263,17 @@ class TransformerDecoderAR(TransformerDecoderBase):
 
 class GraphPredictor(nn.Module):
 
-    def __init__(self, decoder_dim, coords=False):
+    def __init__(
+        self,
+        decoder_dim: int,
+        num_bond_type: int,
+        coords=False
+    ):
         super(GraphPredictor, self).__init__()
         self.coords = coords
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
-        #     nn.Linear(decoder_dim, 7)
-        # )
         self.mlp = nn.Sequential(
             nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
-            nn.Linear(decoder_dim, 9)
+            nn.Linear(decoder_dim, num_bond_type)
         )
         if coords:
             self.coords_mlp = nn.Sequential(
@@ -313,11 +314,6 @@ def get_edge_prediction(edge_prob):
             edge_prob[i][j][6] = (edge_prob[i][j][6] + edge_prob[j][i][5]) / 2
             edge_prob[j][i][5] = edge_prob[i][j][6]
             edge_prob[j][i][6] = edge_prob[i][j][5]
-
-            edge_prob[i][j][7] = (edge_prob[i][j][7] + edge_prob[j][i][8]) / 2
-            edge_prob[i][j][8] = (edge_prob[i][j][8] + edge_prob[j][i][7]) / 2
-            edge_prob[j][i][7] = edge_prob[i][j][8]
-            edge_prob[j][i][8] = edge_prob[i][j][7]
     prediction = np.argmax(edge_prob, axis=2).tolist()
     score = np.max(edge_prob, axis=2).tolist()
 
@@ -335,7 +331,11 @@ class Decoder(nn.Module):
         decoder = {}
         for format_ in args.formats:
             if format_ == 'edges':
-                decoder['edges'] = GraphPredictor(args.dec_hidden_size, coords=args.continuous_coords)
+                decoder['edges'] = GraphPredictor(
+                    decoder_dim=args.dec_hidden_size,
+                    num_bond_type=args.num_bond_type,
+                    coords=args.continuous_coords
+                )
             else:
                 decoder[format_] = TransformerDecoderAR(args, tokenizer[format_])
         self.decoder = nn.ModuleDict(decoder)

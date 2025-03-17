@@ -6,7 +6,8 @@ import math
 import time
 import datetime
 import json
-from json import encoder
+import logging
+import sys
 
 
 FORMAT_INFO = {
@@ -26,16 +27,19 @@ FORMAT_INFO = {
 }
 
 
-def init_logger(log_file='train.log'):
-    from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
-    logger = getLogger(__name__)
-    logger.setLevel(INFO)
-    handler1 = StreamHandler()
-    handler1.setFormatter(Formatter("%(message)s"))
-    handler2 = FileHandler(filename=log_file)
-    handler2.setFormatter(Formatter("%(message)s"))
-    logger.addHandler(handler1)
-    logger.addHandler(handler2)
+def init_logger(args):
+    os.makedirs(f"./logs", exist_ok=True)
+    dt = datetime.datetime.strftime(datetime.datetime.now(), "%y%m%d-%H%Mh")
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(f"./logs/{args.log_file}.{dt}")
+    sh = logging.StreamHandler(sys.stdout)
+    fh.setLevel(logging.INFO)
+    sh.setLevel(logging.INFO)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+
     return logger
 
 
@@ -125,12 +129,14 @@ def timeSince(since, percent):
     return '%s (remain %s)' % (asMinutes(s), asMinutes(rs))
 
 
-def print_rank_0(message):
+def log_rank_0(message):
     if torch.distributed.is_initialized():
         if torch.distributed.get_rank() == 0:
-            print(message, flush=True)
+            logging.info(message)
+            sys.stdout.flush()
     else:
-        print(message, flush=True)
+        logging.info(message)
+        sys.stdout.flush()
 
 
 def to_device(data, device):

@@ -451,6 +451,7 @@ class CharTokenizer(NodeTokenizer):
         return labels, indices
 
     def sequence_to_smiles(self, sequence):
+        # sequence = [1, 81, 101, 207, 57, 122, 186, 57, 143, 207, 81, 164, 186, 2]
         has_coords = not self.continuous_coords
         smiles = ''
         coords, symbols, indices = [], [], []
