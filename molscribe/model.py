@@ -1,15 +1,12 @@
 import numpy as np
-
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import timm
-
-from .utils import FORMAT_INFO, to_device
-from .tokenizer import SOS_ID, EOS_ID, PAD_ID, MASK_ID
 from .inference import GreedySearch, BeamSearch
+from .tokenizer import SOS_ID, EOS_ID, PAD_ID, MASK_ID
 from .transformer import TransformerDecoder, Embeddings
+from .utils import FORMAT_INFO, to_device
 
 
 class Encoder(nn.Module):
@@ -118,6 +115,7 @@ class TransformerDecoderBase(nn.Module):
             pos_emb = self.enc_pos_emb(torch.arange(max_len, device=device)).unsqueeze(0)
             encoder_out = encoder_out + pos_emb
         encoder_out = self.enc_trans_layer(encoder_out)
+
         return encoder_out
 
 
@@ -134,13 +132,15 @@ class TransformerDecoderAR(TransformerDecoderBase):
             word_vocab_size=self.vocab_size,
             word_padding_idx=PAD_ID,
             position_encoding=True,
-            dropout=args.hidden_dropout)
+            dropout=args.hidden_dropout
+        )
 
     def dec_embedding(self, tgt, step=None):
         pad_idx = self.embeddings.word_padding_idx
         tgt_pad_mask = tgt.data.eq(pad_idx).transpose(1, 2)  # [B, 1, T_tgt]
         emb = self.embeddings(tgt, step=step)
         assert emb.dim() == 3  # batch x len x embedding_dim
+
         return emb, tgt_pad_mask
 
     def forward(self, encoder_out, labels, label_lengths):
@@ -155,11 +155,17 @@ class TransformerDecoderAR(TransformerDecoderBase):
         logits = self.output_layer(dec_out)  # (b, t, h) -> (b, t, v)
         return logits[:, :-1], labels[:, 1:], dec_out
 
-    def decode(self, encoder_out, beam_size: int, n_best: int, min_length: int = 1, max_length: int = 256,
-               labels=None):
-        """Inference mode. Autoregressively decode the sequence. Only greedy search is supported now. Beam search is
-        out-dated. The labels is used for partial prediction, i.e. part of the sequence is given. In standard decoding,
-        labels=None."""
+    def decode(
+        self, encoder_out, beam_size: int,
+        n_best: int, min_length: int = 1, max_length: int = 256,
+        labels=None
+    ):
+        """
+        Inference mode. Autoregressively decode the sequence.
+        Only greedy search is supported now. Beam search is out-dated.
+        The labels are used for partial prediction,
+        i.e. part of the sequence is given. In standard decoding, labels=None.
+        """
         batch_size, max_len, _ = encoder_out.size()
         memory_bank = self.enc_transform(encoder_out)
         orig_labels = labels
@@ -184,6 +190,7 @@ class TransformerDecoderAR(TransformerDecoderBase):
 
         # (2) prep decode_strategy. Possibly repeat src objects.
         _, memory_bank = decode_strategy.initialize(memory_bank=memory_bank)
+        parallel_paths = decode_strategy.parallel_paths
 
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
@@ -221,6 +228,8 @@ class TransformerDecoderAR(TransformerDecoderBase):
                 memory_bank = memory_bank.index_select(0, select_indices)
                 if labels is not None:
                     labels = labels.index_select(0, select_indices)
+
+            if parallel_paths > 1 or any_finished:
                 self.map_state(lambda state, dim: state.index_select(dim, select_indices))
 
         results["scores"] = decode_strategy.scores  # fixed to be average of token scores
@@ -240,7 +249,6 @@ class TransformerDecoderAR(TransformerDecoderBase):
 
     # adapted from onmt.decoders.transformer
     def map_state(self, fn):
-        # FIXME: port the changes from G2S if needed
         def _recursive_map(struct, batch_dim=0):
             for k, v in struct.items():
                 if v is not None:
