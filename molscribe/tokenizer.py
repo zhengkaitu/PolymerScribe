@@ -1,8 +1,9 @@
 import os
 import json
-import random
 import numpy as np
+import random
 from SmilesPE.pretokenizer import atomwise_tokenizer
+from typing import Dict, List, Optional
 
 PAD = '<pad>'
 SOS = '<sos>'
@@ -15,17 +16,18 @@ EOS_ID = 2
 UNK_ID = 3
 MASK_ID = 4
 
+SEP = "<sep>"
+BRA = "<bra>"
+KET = "<ket>"
 
-class Tokenizer(object):
+
+class Tokenizer:
 
     def __init__(self, path=None):
         self.stoi = {}
         self.itos = {}
         if path:
             self.load(path)
-
-    def __len__(self):
-        return len(self.stoi)
 
     @property
     def output_constraint(self):
@@ -39,50 +41,6 @@ class Tokenizer(object):
         with open(path) as f:
             self.stoi = json.load(f)
         self.itos = {item[1]: item[0] for item in self.stoi.items()}
-
-    def fit_on_texts(self, texts):
-        vocab = set()
-        for text in texts:
-            vocab.update(text.split(' '))
-        vocab = [PAD, SOS, EOS, UNK] + list(vocab)
-        for i, s in enumerate(vocab):
-            self.stoi[s] = i
-        self.itos = {item[1]: item[0] for item in self.stoi.items()}
-        assert self.stoi[PAD] == PAD_ID
-        assert self.stoi[SOS] == SOS_ID
-        assert self.stoi[EOS] == EOS_ID
-        assert self.stoi[UNK] == UNK_ID
-
-    def text_to_sequence(self, text, tokenized=True):
-        sequence = []
-        sequence.append(self.stoi['<sos>'])
-        if tokenized:
-            tokens = text.split(' ')
-        else:
-            tokens = atomwise_tokenizer(text)
-        for s in tokens:
-            if s not in self.stoi:
-                s = '<unk>'
-            sequence.append(self.stoi[s])
-        sequence.append(self.stoi['<eos>'])
-        return sequence
-
-    def texts_to_sequences(self, texts):
-        sequences = []
-        for text in texts:
-            sequence = self.text_to_sequence(text)
-            sequences.append(sequence)
-        return sequences
-
-    def sequence_to_text(self, sequence):
-        return ''.join(list(map(lambda i: self.itos[i], sequence)))
-
-    def sequences_to_texts(self, sequences):
-        texts = []
-        for sequence in sequences:
-            text = self.sequence_to_text(sequence)
-            texts.append(text)
-        return texts
 
     def predict_caption(self, sequence):
         caption = ''
@@ -114,245 +72,79 @@ class NodeTokenizer(Tokenizer):
         self.continuous_coords = continuous_coords
         self.debug = debug
 
+        self.stoi_ext = {
+            SEP: self.offset + self.maxx + self.maxy,
+            BRA: self.offset + self.maxx + self.maxy + 1,
+            KET: self.offset + self.maxx + self.maxy + 2
+        }
+
     def __len__(self):
-        if self.sep_xy:
-            return self.offset + self.maxx + self.maxy
-        else:
-            return self.offset + max(self.maxx, self.maxy)
+        assert self.sep_xy
+        return self.offset + self.maxx + self.maxy + self.ext_size
 
     @property
     def offset(self):
         return len(self.stoi)
 
     @property
+    def ext_size(self):
+        return len(self.stoi_ext)
+
+    @property
     def output_constraint(self):
-        return not self.continuous_coords
+        assert not self.continuous_coords
+        return True
 
     def len_symbols(self):
         return len(self.stoi)
-
-    def fit_atom_symbols(self, atoms):
-        vocab = self.special_tokens + list(set(atoms))
-        for i, s in enumerate(vocab):
-            self.stoi[s] = i
-        assert self.stoi[PAD] == PAD_ID
-        assert self.stoi[SOS] == SOS_ID
-        assert self.stoi[EOS] == EOS_ID
-        assert self.stoi[UNK] == UNK_ID
-        assert self.stoi[MASK] == MASK_ID
-        self.itos = {item[1]: item[0] for item in self.stoi.items()}
 
     def is_x(self, x):
         return self.offset <= x < self.offset + self.maxx
 
     def is_y(self, y):
-        if self.sep_xy:
-            return self.offset + self.maxx <= y
-        return self.offset <= y
+        assert self.sep_xy
+        return self.offset + self.maxx <= y < self.offset + self.maxx + self.maxy
 
     def is_symbol(self, s):
         return len(self.special_tokens) <= s < self.offset or s == UNK_ID
 
     def is_atom(self, id):
-        if self.is_symbol(id):
-            return self.is_atom_token(self.itos[id])
-        return False
+        # The logic here might be trickier (or maybe just process downstream)
+        return self.is_symbol(id) and self.is_atom_token(self.itos[id])
 
-    def is_atom_token(self, token):
+    @staticmethod
+    def is_atom_token(token):
         return token.isalpha() or token.startswith("[") or token == '*' or token == UNK
 
     def x_to_id(self, x):
         return self.offset + round(x * (self.maxx - 1))
 
     def y_to_id(self, y):
-        if self.sep_xy:
-            return self.offset + self.maxx + round(y * (self.maxy - 1))
-        return self.offset + round(y * (self.maxy - 1))
+        assert self.sep_xy
+        return self.offset + self.maxx + round(y * (self.maxy - 1))
 
     def id_to_x(self, id):
         return (id - self.offset) / (self.maxx - 1)
 
     def id_to_y(self, id):
-        if self.sep_xy:
-            return (id - self.offset - self.maxx) / (self.maxy - 1)
-        return (id - self.offset) / (self.maxy - 1)
-    
-    def get_output_mask(self, id):
-        mask = [False] * len(self)
-        if self.continuous_coords:
-            return mask
-        if self.is_atom(id):
-            return [True] * self.offset + [False] * self.maxx + [True] * self.maxy
-        if self.is_x(id):
-            return [True] * (self.offset + self.maxx) + [False] * self.maxy
-        if self.is_y(id):
-            return [False] * self.offset + [True] * (self.maxx + self.maxy)
-        return mask
+        assert self.sep_xy
+        return (id - self.offset - self.maxx) / (self.maxy - 1)
 
     def symbol_to_id(self, symbol):
-        if symbol not in self.stoi:
-            return UNK_ID
-        return self.stoi[symbol]
-
-    def symbols_to_labels(self, symbols):
-        labels = []
-        for symbol in symbols:
-            labels.append(self.symbol_to_id(symbol))
-        return labels
-
-    def labels_to_symbols(self, labels):
-        symbols = []
-        for label in labels:
-            symbols.append(self.itos[label])
-        return symbols
-
-    def nodes_to_grid(self, nodes):
-        coords, symbols = nodes['coords'], nodes['symbols']
-        grid = np.zeros((self.maxx, self.maxy), dtype=int)
-        for [x, y], symbol in zip(coords, symbols):
-            x = round(x * (self.maxx - 1))
-            y = round(y * (self.maxy - 1))
-            grid[x][y] = self.symbol_to_id(symbol)
-        return grid
-
-    def grid_to_nodes(self, grid):
-        coords, symbols, indices = [], [], []
-        for i in range(self.maxx):
-            for j in range(self.maxy):
-                if grid[i][j] != 0:
-                    x = i / (self.maxx - 1)
-                    y = j / (self.maxy - 1)
-                    coords.append([x, y])
-                    symbols.append(self.itos[grid[i][j]])
-                    indices.append([i, j])
-        return {'coords': coords, 'symbols': symbols, 'indices': indices}
-
-    def nodes_to_sequence(self, nodes):
-        coords, symbols = nodes['coords'], nodes['symbols']
-        labels = [SOS_ID]
-        for (x, y), symbol in zip(coords, symbols):
-            assert 0 <= x <= 1
-            assert 0 <= y <= 1
-            labels.append(self.x_to_id(x))
-            labels.append(self.y_to_id(y))
-            labels.append(self.symbol_to_id(symbol))
-        labels.append(EOS_ID)
-        return labels
-
-    def sequence_to_nodes(self, sequence):
-        coords, symbols = [], []
-        i = 0
-        if sequence[0] == SOS_ID:
-            i += 1
-        while i + 2 < len(sequence):
-            if sequence[i] == EOS_ID:
-                break
-            if self.is_x(sequence[i]) and self.is_y(sequence[i+1]) and self.is_symbol(sequence[i+2]):
-                x = self.id_to_x(sequence[i])
-                y = self.id_to_y(sequence[i+1])
-                symbol = self.itos[sequence[i+2]]
-                coords.append([x, y])
-                symbols.append(symbol)
-            i += 3
-        return {'coords': coords, 'symbols': symbols}
-
-    def smiles_to_sequence(self, smiles, coords=None, mask_ratio=0, atom_only=False):
-        tokens = atomwise_tokenizer(smiles)
-        labels = [SOS_ID]
-        indices = []
-        atom_idx = -1
-        for token in tokens:
-            if atom_only and not self.is_atom_token(token):
-                continue
-            if token in self.stoi:
-                labels.append(self.stoi[token])
-            else:
-                if self.debug:
-                    print(f'{token} not in vocab')
-                labels.append(UNK_ID)
-            if self.is_atom_token(token):
-                atom_idx += 1
-                if not self.continuous_coords:
-                    if mask_ratio > 0 and random.random() < mask_ratio:
-                        labels.append(MASK_ID)
-                        labels.append(MASK_ID)
-                    elif coords is not None:
-                        if atom_idx < len(coords):
-                            x, y = coords[atom_idx]
-                            assert 0 <= x <= 1
-                            assert 0 <= y <= 1
-                        else:
-                            x = random.random()
-                            y = random.random()
-                        labels.append(self.x_to_id(x))
-                        labels.append(self.y_to_id(y))
-                indices.append(len(labels) - 1)
-        labels.append(EOS_ID)
-        return labels, indices
-
-    def sequence_to_smiles(self, sequence):
-        has_coords = not self.continuous_coords
-        smiles = ''
-        coords, symbols, indices = [], [], []
-        for i, label in enumerate(sequence):
-            if label == EOS_ID or label == PAD_ID:
-                break
-            if self.is_x(label) or self.is_y(label):
-                continue
-            token = self.itos[label]
-            smiles += token
-            if self.is_atom_token(token):
-                if has_coords:
-                    if i+3 < len(sequence) and self.is_x(sequence[i+1]) and self.is_y(sequence[i+2]):
-                        x = self.id_to_x(sequence[i+1])
-                        y = self.id_to_y(sequence[i+2])
-                        coords.append([x, y])
-                        symbols.append(token)
-                        indices.append(i+3)
-                else:
-                    if i+1 < len(sequence):
-                        symbols.append(token)
-                        indices.append(i+1)
-        results = {'smiles': smiles, 'symbols': symbols, 'indices': indices}
-        if has_coords:
-            results['coords'] = coords
-        return results
+        return self.stoi.get(symbol, UNK_ID)
 
 
 class CharTokenizer(NodeTokenizer):
 
-    def __init__(self, input_size=100, path=None, sep_xy=False, continuous_coords=False, debug=False):
+    def __init__(
+        self,
+        input_size=100,
+        path=None,
+        sep_xy=False,
+        continuous_coords=False,
+        debug=False
+    ):
         super().__init__(input_size, path, sep_xy, continuous_coords, debug)
-
-    def fit_on_texts(self, texts):
-        vocab = set()
-        for text in texts:
-            vocab.update(list(text))
-        if ' ' in vocab:
-            vocab.remove(' ')
-        vocab = [PAD, SOS, EOS, UNK] + list(vocab)
-        for i, s in enumerate(vocab):
-            self.stoi[s] = i
-        self.itos = {item[1]: item[0] for item in self.stoi.items()}
-        assert self.stoi[PAD] == PAD_ID
-        assert self.stoi[SOS] == SOS_ID
-        assert self.stoi[EOS] == EOS_ID
-        assert self.stoi[UNK] == UNK_ID
-
-    def text_to_sequence(self, text, tokenized=True):
-        sequence = []
-        sequence.append(self.stoi['<sos>'])
-        if tokenized:
-            tokens = text.split(' ')
-            assert all(len(s) == 1 for s in tokens)
-        else:
-            tokens = list(text)
-        for s in tokens:
-            if s not in self.stoi:
-                s = '<unk>'
-            sequence.append(self.stoi[s])
-        sequence.append(self.stoi['<eos>'])
-        return sequence
 
     def fit_atom_symbols(self, atoms):
         atoms = list(set(atoms))
@@ -370,84 +162,59 @@ class CharTokenizer(NodeTokenizer):
         self.itos = {item[1]: item[0] for item in self.stoi.items()}
 
     def get_output_mask(self, id):
-        ''' TO FIX '''
+        """TO FIX"""
         mask = [False] * len(self)
-        if self.continuous_coords:
-            return mask
         if self.is_x(id):
             return [True] * (self.offset + self.maxx) + [False] * self.maxy
         if self.is_y(id):
             return [False] * self.offset + [True] * (self.maxx + self.maxy)
         return mask
 
-    def nodes_to_sequence(self, nodes):
-        coords, symbols = nodes['coords'], nodes['symbols']
-        labels = [SOS_ID]
-        for (x, y), symbol in zip(coords, symbols):
-            assert 0 <= x <= 1
-            assert 0 <= y <= 1
-            labels.append(self.x_to_id(x))
-            labels.append(self.y_to_id(y))
-            for char in symbol:
-                labels.append(self.symbol_to_id(char))
-        labels.append(EOS_ID)
-        return labels
-
-    def sequence_to_nodes(self, sequence):
-        coords, symbols = [], []
-        i = 0
-        if sequence[0] == SOS_ID:
-            i += 1
-        while i < len(sequence):
-            if sequence[i] == EOS_ID:
-                break
-            if i+2 < len(sequence) and self.is_x(sequence[i]) and self.is_y(sequence[i+1]) and self.is_symbol(sequence[i+2]):
-                x = self.id_to_x(sequence[i])
-                y = self.id_to_y(sequence[i+1])
-                for j in range(i+2, len(sequence)):
-                    if not self.is_symbol(sequence[j]):
-                        break
-                symbol = ''.join(self.itos(sequence[k]) for k in range(i+2, j))
-                coords.append([x, y])
-                symbols.append(symbol)
-                i = j
-            else:
-                i += 1
-        return {'coords': coords, 'symbols': symbols}
-
-    def smiles_to_sequence(self, smiles, coords=None, mask_ratio=0, atom_only=False):
+    def smiles_and_bracket_to_sequence(
+        self,
+        smiles: str,
+        bracket_tokens: List[List[str]],
+        node_coords: Optional[np.ndarray] = None,
+        bracket_coords: Optional[np.ndarray] = None,
+        mask_ratio: float = 0
+    ):
         tokens = atomwise_tokenizer(smiles)
         labels = [SOS_ID]
         indices = []
         atom_idx = -1
         for token in tokens:
-            if atom_only and not self.is_atom_token(token):
-                continue
             for c in token:
-                if c in self.stoi:
-                    labels.append(self.stoi[c])
-                else:
-                    if self.debug:
-                        print(f'{c} not in vocab')
-                    labels.append(UNK_ID)
+                labels.append(self.stoi.get(c, UNK_ID))
             if self.is_atom_token(token):
                 atom_idx += 1
-                if not self.continuous_coords:
-                    if mask_ratio > 0 and random.random() < mask_ratio:
-                        labels.append(MASK_ID)
-                        labels.append(MASK_ID)
-                    elif coords is not None:
-                        if atom_idx < len(coords):
-                            x, y = coords[atom_idx]
-                            assert 0 <= x <= 1
-                            assert 0 <= y <= 1
-                        else:
-                            x = random.random()
-                            y = random.random()
-                        labels.append(self.x_to_id(x))
-                        labels.append(self.y_to_id(y))
+                if mask_ratio > 0 and random.random() < mask_ratio:
+                    labels.append(MASK_ID)
+                    labels.append(MASK_ID)
+                elif node_coords is not None:
+                    if atom_idx < len(node_coords):
+                        x, y = node_coords[atom_idx]
+                        assert 0 <= x <= 1
+                        assert 0 <= y <= 1
+                    else:
+                        x = random.random()
+                        y = random.random()
+                    labels.append(self.x_to_id(x))
+                    labels.append(self.y_to_id(y))
                 indices.append(len(labels) - 1)
+        labels.append(self.stoi_ext[SEP])
+
+        assert len(bracket_tokens) == len(bracket_coords)
+        for tokens, coords in zip(bracket_tokens, bracket_coords):
+            for token in tokens:
+                labels.append(self.stoi_ext.get(token, self.stoi.get(token, UNK_ID)))
+            x, y = coords
+            assert 0 <= x <= 1
+            assert 0 <= y <= 1
+            labels.append(self.x_to_id(x))
+            labels.append(self.y_to_id(y))
+
         labels.append(EOS_ID)
+
         return labels, indices
 
     def sequence_to_smiles(self, sequence):
@@ -505,21 +272,15 @@ class CharTokenizer(NodeTokenizer):
         return results
 
 
-def get_tokenizer(args):
-    tokenizer = {}
-    for format_ in args.formats:
-        if format_ == 'atomtok':
-            if args.vocab_file is None:
-                args.vocab_file = os.path.join(os.path.dirname(__file__), 'vocab/vocab_uspto.json')
-            tokenizer['atomtok'] = Tokenizer(args.vocab_file)
-        elif format_ == "atomtok_coords":
-            if args.vocab_file is None:
-                args.vocab_file = os.path.join(os.path.dirname(__file__), 'vocab/vocab_uspto.json')
-            tokenizer["atomtok_coords"] = NodeTokenizer(args.coord_bins, args.vocab_file, args.sep_xy,
-                                                        continuous_coords=args.continuous_coords)
-        elif format_ == "chartok_coords":
-            if args.vocab_file is None:
-                args.vocab_file = os.path.join(os.path.dirname(__file__), 'vocab/vocab_chars.json')
-            tokenizer["chartok_coords"] = CharTokenizer(args.coord_bins, args.vocab_file, args.sep_xy,
-                                                        continuous_coords=args.continuous_coords)
+def get_tokenizer(args) -> Dict[str, Tokenizer]:
+    args.vocab_file = os.path.join(os.path.dirname(__file__), 'vocab/vocab_chars.json')
+
+    tokenizer = {
+        "chartok_coords": CharTokenizer(
+            args.coord_bins,
+            args.vocab_file,
+            args.sep_xy,
+            continuous_coords=args.continuous_coords)
+    }
+
     return tokenizer
