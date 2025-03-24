@@ -8,6 +8,7 @@ import datetime
 import json
 import logging
 import sys
+from typing import Dict
 
 
 FORMAT_INFO = {
@@ -67,7 +68,7 @@ def seed_torch(seed=42):
     torch.backends.cudnn.deterministic = True
 
 
-class AverageMeter(object):
+class AverageMeter:
     """Computes and stores the average and current value"""
     def __init__(self):
         self.reset()
@@ -105,7 +106,12 @@ class LossMeter(EpochMeter):
         for k in self.subs:
             self.subs[k].reset()
 
-    def update(self, loss, losses, n=1):
+    def update(
+        self,
+        loss: torch.Tensor,
+        losses: Dict[str, torch.Tensor],
+        n: int = 1
+    ):
         loss = loss.item()
         super().update(loss, n)
         losses = {k: v.item() for k, v in losses.items()}

@@ -42,24 +42,6 @@ class Tokenizer:
             self.stoi = json.load(f)
         self.itos = {item[1]: item[0] for item in self.stoi.items()}
 
-    def predict_caption(self, sequence):
-        caption = ''
-        for i in sequence:
-            if i == self.stoi['<eos>'] or i == self.stoi['<pad>']:
-                break
-            caption += self.itos[i]
-        return caption
-
-    def predict_captions(self, sequences):
-        captions = []
-        for sequence in sequences:
-            caption = self.predict_caption(sequence)
-            captions.append(caption)
-        return captions
-
-    def sequence_to_smiles(self, sequence):
-        return {'smiles': self.predict_caption(sequence)}
-
 
 class NodeTokenizer(Tokenizer):
 

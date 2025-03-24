@@ -14,71 +14,27 @@ class Encoder(nn.Module):
         super().__init__()
         model_name = args.encoder
         self.model_name = model_name
-        if model_name.startswith('resnet'):
-            self.model_type = 'resnet'
-            self.cnn = timm.create_model(model_name, pretrained=pretrained)
-            self.n_features = self.cnn.num_features  # encoder_dim
-            self.cnn.global_pool = nn.Identity()
-            self.cnn.fc = nn.Identity()
-        elif model_name.startswith('swin'):
-            self.model_type = 'swin'
-            self.transformer = timm.create_model(model_name, pretrained=pretrained, pretrained_strict=False,
-                                                 use_checkpoint=args.use_checkpoint)
-            self.n_features = self.transformer.num_features
-            self.transformer.head = nn.Identity()
-        elif 'efficientnet' in model_name:
-            self.model_type = 'efficientnet'
-            self.cnn = timm.create_model(model_name, pretrained=pretrained)
-            self.n_features = self.cnn.num_features
-            self.cnn.global_pool = nn.Identity()
-            self.cnn.classifier = nn.Identity()
-        else:
-            raise NotImplemented
+        assert model_name.startswith("swin")
+        self.model_type = 'swin'
+        self.transformer = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            pretrained_strict=False,
+            use_checkpoint=args.use_checkpoint
+        )
+        self.n_features = self.transformer.num_features
+        self.transformer.head = nn.Identity()
 
-    def swin_forward(self, transformer, x):
-        x = transformer.patch_embed(x)
-        if transformer.absolute_pos_embed is not None:
-            x = x + transformer.absolute_pos_embed
-        x = transformer.pos_drop(x)
+    def forward(self, x):
+        features, hiddens = self.transformer(x)
 
-        def layer_forward(layer, x, hiddens):
-            for blk in layer.blocks:
-                if not torch.jit.is_scripting() and layer.use_checkpoint:
-                    x = torch.utils.checkpoint.checkpoint(blk, x)
-                else:
-                    x = blk(x)
-            H, W = layer.input_resolution
-            B, L, C = x.shape
-            hiddens.append(x.view(B, H, W, C))
-            if layer.downsample is not None:
-                x = layer.downsample(x)
-            return x, hiddens
-
-        hiddens = []
-        for layer in transformer.layers:
-            x, hiddens = layer_forward(layer, x, hiddens)
-        x = transformer.norm(x)  # B L C
-        hiddens[-1] = x.view_as(hiddens[-1])
-        return x, hiddens
-
-    def forward(self, x, refs=None):
-        if self.model_type in ['resnet', 'efficientnet']:
-            features = self.cnn(x)
-            features = features.permute(0, 2, 3, 1)
-            hiddens = []
-        elif self.model_type == 'swin':
-            if 'patch' in self.model_name:
-                features, hiddens = self.swin_forward(self.transformer, x)
-            else:
-                features, hiddens = self.transformer(x)
-        else:
-            raise NotImplemented
         return features, hiddens
 
 
-class TransformerDecoderBase(nn.Module):
+class TransformerDecoderAR(nn.Module):
+    """Autoregressive Transformer Decoder"""
 
-    def __init__(self, args):
+    def __init__(self, args, tokenizer):
         super().__init__()
         self.args = args
 
@@ -105,6 +61,17 @@ class TransformerDecoderBase(nn.Module):
             pos_ffn_activation_fn='gelu'
         )
 
+        self.tokenizer = tokenizer
+        self.vocab_size = len(self.tokenizer)
+        self.output_layer = nn.Linear(args.dec_hidden_size, self.vocab_size, bias=True)
+        self.embeddings = Embeddings(
+            word_vec_size=args.dec_hidden_size,
+            word_vocab_size=self.vocab_size,
+            word_padding_idx=PAD_ID,
+            position_encoding=True,
+            dropout=args.hidden_dropout
+        )
+
     def enc_transform(self, encoder_out):
         batch_size = encoder_out.size(0)
         encoder_dim = encoder_out.size(-1)
@@ -117,23 +84,6 @@ class TransformerDecoderBase(nn.Module):
         encoder_out = self.enc_trans_layer(encoder_out)
 
         return encoder_out
-
-
-class TransformerDecoderAR(TransformerDecoderBase):
-    """Autoregressive Transformer Decoder"""
-
-    def __init__(self, args, tokenizer):
-        super().__init__(args)
-        self.tokenizer = tokenizer
-        self.vocab_size = len(self.tokenizer)
-        self.output_layer = nn.Linear(args.dec_hidden_size, self.vocab_size, bias=True)
-        self.embeddings = Embeddings(
-            word_vec_size=args.dec_hidden_size,
-            word_vocab_size=self.vocab_size,
-            word_padding_idx=PAD_ID,
-            position_encoding=True,
-            dropout=args.hidden_dropout
-        )
 
     def dec_embedding(self, tgt, step=None):
         pad_idx = self.embeddings.word_padding_idx
@@ -172,14 +122,29 @@ class TransformerDecoderAR(TransformerDecoderBase):
 
         if beam_size == 1:
             decode_strategy = GreedySearch(
-                sampling_temp=0.0, keep_topk=1, batch_size=batch_size, min_length=min_length, max_length=max_length,
-                pad=PAD_ID, bos=SOS_ID, eos=EOS_ID,
-                return_attention=False, return_hidden=True)
+                sampling_temp=0.0,
+                keep_topk=1,
+                batch_size=batch_size,
+                min_length=min_length,
+                max_length=max_length,
+                pad=PAD_ID,
+                bos=SOS_ID,
+                eos=EOS_ID,
+                return_attention=False,
+                return_hidden=True
+            )
         else:
             decode_strategy = BeamSearch(
-                beam_size=beam_size, n_best=n_best, batch_size=batch_size, min_length=min_length, max_length=max_length,
-                pad=PAD_ID, bos=SOS_ID, eos=EOS_ID,
-                return_attention=False)
+                beam_size=beam_size,
+                n_best=n_best,
+                batch_size=batch_size,
+                min_length=min_length,
+                max_length=max_length,
+                pad=PAD_ID,
+                bos=SOS_ID,
+                eos=EOS_ID,
+                return_attention=False
+            )
 
         # adapted from onmt.translate.translator
         results = {
@@ -347,14 +312,10 @@ class Decoder(nn.Module):
         refs = to_device(refs, encoder_out.device)
         for format_ in self.formats:
             if format_ == 'edges':
-                if 'atomtok_coords' in results:
-                    dec_out = results['atomtok_coords'][2]
-                    predictions = self.decoder['edges'](dec_out, indices=refs['atom_indices'][0])
-                elif 'chartok_coords' in results:
-                    dec_out = results['chartok_coords'][2]
-                    predictions = self.decoder['edges'](dec_out, indices=refs['atom_indices'][0])
-                else:
-                    raise NotImplemented
+                assert 'chartok_coords' in results
+                dec_out = results['chartok_coords'][2]
+                predictions = self.decoder['edges'](dec_out, indices=refs['atom_indices'][0])
+
                 targets = {'edges': refs['edges']}
                 if 'coords' in predictions:
                     targets['coords'] = refs['coords']
@@ -370,7 +331,7 @@ class Decoder(nn.Module):
         results = {}
         predictions = []
         for format_ in self.formats:
-            if format_ in ['atomtok', 'atomtok_coords', 'chartok_coords']:
+            if format_ == "chartok_coords":
                 max_len = FORMAT_INFO[format_]['max_len']
                 results[format_] = self.decoder[format_].decode(encoder_out, beam_size, n_best, max_length=max_len)
                 outputs, scores, token_scores, *_ = results[format_]
@@ -392,12 +353,8 @@ class Decoder(nn.Module):
                         predictions[i][format_]['atom_scores'] = atom_scores
                         predictions[i][format_]['average_token_score'] = scores[i][0]
             if format_ == 'edges':
-                if 'atomtok_coords' in results:
-                    atom_format = 'atomtok_coords'
-                elif 'chartok_coords' in results:
-                    atom_format = 'chartok_coords'
-                else:
-                    raise NotImplemented
+                assert "chartok_coords" in results
+                atom_format = "chartok_coords"
                 dec_out = results[atom_format][3]  # batch x n_best x len x dim
                 for i in range(len(dec_out)):
                     hidden = dec_out[i][0].unsqueeze(0)  # 1 * len * dim

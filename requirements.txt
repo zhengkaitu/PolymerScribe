@@ -11,4 +11,3 @@ SmilesPE==0.0.3
 tensorboardX==2.6.2
 timm @ git+https://github.com/rwightman/pytorch-image-models.git@54a6cca27a9a3e092a07457f5d56709da56e3cf5
 transformers==4.5.1
-packaging==21.3

@@ -1,39 +1,33 @@
-import os
-import sys
-import time
-import json
-import random
 import argparse
 import datetime
-import numpy as np
+import json
+import os
 import pandas as pd
-
+import time
 import torch
 import torch.distributed as dist
-from torch.optim import Adam, AdamW, SGD
+from evaluate import SmilesEvaluator
+from molscribe.chemistry import convert_graph_to_smiles, postprocess_smiles, keep_main_molecule
+from molscribe.dataset import TrainDataset, polymer_collate
+from molscribe.model import Encoder, Decoder
+from molscribe.loss import Criterion
+from molscribe.tokenizer import get_tokenizer
+from molscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
+    log_rank_0, format_df, init_logger
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import get_scheduler
-
-from molscribe.dataset import TrainDataset, AuxTrainDataset, bms_collate
-from molscribe.model import Encoder, Decoder
-from molscribe.loss import Criterion
-from molscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
-    print_rank_0, format_df
-from molscribe.chemistry import convert_graph_to_smiles, postprocess_smiles, keep_main_molecule
-from molscribe.tokenizer import get_tokenizer
-from evaluate import SmilesEvaluator
-
-import warnings
-warnings.filterwarnings('ignore')
+from typing import Any, Dict, Optional, Tuple
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--do_train', action='store_true')
-    parser.add_argument('--do_valid', action='store_true')
+    parser.add_argument('--do_val', action='store_true')
     parser.add_argument('--do_test', action='store_true')
+    parser.add_argument('--log_file', type=str, default=None)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--print_freq', type=int, default=200)
@@ -59,17 +53,15 @@ def get_args():
     group.add_argument("--hidden_dropout", help="Hidden dropout", type=float, default=0.1)
     group.add_argument("--attn_dropout", help="Attention dropout", type=float, default=0.1)
     group.add_argument("--max_relative_positions", help="Max relative positions", type=int, default=0)
+    group.add_argument("--num_bond_type", help="Number of bond types including no bond", type=int, default=7)
     # Data
     parser.add_argument('--data_path', type=str, default=None)
-    parser.add_argument('--train_file', type=str, default=None)
-    parser.add_argument('--valid_file', type=str, default=None)
-    parser.add_argument('--test_file', type=str, default=None)
-    parser.add_argument('--aux_file', type=str, default=None)
+    parser.add_argument('--train_files', type=str, default=None)
+    parser.add_argument('--val_file', type=str, default=None)
+    parser.add_argument('--test_files', type=str, default=None)
     parser.add_argument('--coords_file', type=str, default=None)
     parser.add_argument('--vocab_file', type=str, default=None)
-    parser.add_argument('--dynamic_indigo', action='store_true')
     parser.add_argument('--default_option', action='store_true')
-    parser.add_argument('--pseudo_coords', action='store_true')
     parser.add_argument('--include_condensed', action='store_true')
     parser.add_argument('--formats', type=str, default=None)
     parser.add_argument('--num_workers', type=int, default=8)
@@ -106,24 +98,25 @@ def get_args():
     # Inference
     parser.add_argument('--beam_size', type=int, default=1)
     parser.add_argument('--n_best', type=int, default=1)
-    parser.add_argument('--predict_coords', action='store_true')
     parser.add_argument('--save_attns', action='store_true')
     parser.add_argument('--molblock', action='store_true')
     parser.add_argument('--compute_confidence', action='store_true')
     parser.add_argument('--keep_main_molecule', action='store_true')
     args = parser.parse_args()
+
     return args
 
 
 def load_states(args, load_path):
-    if load_path.endswith('.pth'):
+    if load_path.endswith(".pth"):
         path = load_path
-    elif args.load_ckpt == 'best':
+    elif args.load_ckpt == "best":
         path = os.path.join(load_path, f'{args.encoder}_{args.decoder}_best.pth')
     else:
         path = os.path.join(load_path, f'{args.encoder}_{args.decoder}_{args.load_ckpt}.pth')
-    print_rank_0('Load ' + path)
+    log_rank_0(f"Load {path}")
     states = torch.load(path, map_location=torch.device('cpu'))
+
     return states
 
 
@@ -131,25 +124,27 @@ def safe_load(module, module_states) -> None:
     def remove_prefix(state_dict):
         return {k.replace('module.', ''): v for k, v in state_dict.items()}
 
-    missing_keys, unexpected_keys = module.load_state_dict(remove_prefix(module_states), strict=False)
+    missing_keys, unexpected_keys = module.load_state_dict(
+        remove_prefix(module_states),
+        strict=False
+    )
     if missing_keys:
-        print_rank_0('Missing keys: ' + str(missing_keys))
+        log_rank_0(f"Missing keys: {str(missing_keys)}")
     if unexpected_keys:
-        print_rank_0('Unexpected keys: ' + str(unexpected_keys))
+        log_rank_0(f"Unexpected keys: {str(unexpected_keys)}")
 
 
 def safe_load_with_shape_change(module, module_states) -> None:
     def remove_prefix(state_dict):
         return {k.replace('module.', ''): v for k, v in state_dict.items()}
 
-    # missing_keys, unexpected_keys = module.load_state_dict(remove_prefix(module_states), strict=False)
-    # if missing_keys:
-    #     print_rank_0('Missing keys: ' + str(missing_keys))
-    # if unexpected_keys:
-    #     print_rank_0('Unexpected keys: ' + str(unexpected_keys))
-
     new_state_dict = module.state_dict()
     pretrained_state_dict = remove_prefix(module_states)
+
+    # Extension for sequence decoder
+
+
+    # Extension for edge decoder (GraphPredictor)
 
     mlp_2_w = new_state_dict["decoder.edges.mlp.2.weight"]
     mlp_2_b = new_state_dict["decoder.edges.mlp.2.bias"]
@@ -166,44 +161,56 @@ def safe_load_with_shape_change(module, module_states) -> None:
 
     module.load_state_dict(new_state_dict)
 
-    # new_model = model(...)  # construct the new model
-    # new_sd = new_model.state_dict()  # take the "default" state_dict
-    # pre_trained_sd = torch.load(file)  # load the old version pre-trained weights
-    # # merge information from pre_trained_sd into new_sd
-    # # ...
-    # # after merging the state dict you can load it:
-    # new_model.load_state_dict(new_sd)
-
 
 def get_model(args, tokenizer, device, load_path=None):
     encoder = Encoder(args, pretrained=(not args.no_pretrained and load_path is None))
     args.encoder_dim = encoder.n_features
-    print_rank_0(f'encoder_dim: {args.encoder_dim}')
+    log_rank_0(f"encoder_dim: {args.encoder_dim}")
 
     decoder = Decoder(args, tokenizer)
     if load_path:
         states = load_states(args, load_path)
-        safe_load(encoder, states['encoder'])
-        # safe_load(decoder, states['decoder'])
-        safe_load_with_shape_change(decoder, states['decoder'])
-        # print_rank_0(f"Model loaded from {load_path}")
+        safe_load(encoder, states["encoder"])
+        safe_load_with_shape_change(decoder, states["decoder"])
+
+        log_rank_0(f"Model loaded from {load_path}")
     encoder.to(device)
     decoder.to(device)
 
     if args.local_rank != -1:
         encoder = DDP(encoder, device_ids=[args.local_rank], output_device=args.local_rank)
         decoder = DDP(decoder, device_ids=[args.local_rank], output_device=args.local_rank)
-        print_rank_0("DDP setup finished")
+        log_rank_0("DDP setup finished")
 
     return encoder, decoder
 
 
 def get_optimizer_and_scheduler(args, encoder, decoder, load_path=None):
-    encoder_optimizer = AdamW(encoder.parameters(), lr=args.encoder_lr, weight_decay=args.weight_decay, amsgrad=False)
-    encoder_scheduler = get_scheduler(args.scheduler, encoder_optimizer, args.num_warmup_steps, args.num_training_steps)
+    encoder_optimizer = AdamW(
+        encoder.parameters(),
+        lr=args.encoder_lr,
+        weight_decay=args.weight_decay,
+        amsgrad=False
+    )
+    encoder_scheduler = get_scheduler(
+        args.scheduler,
+        encoder_optimizer,
+        args.num_warmup_steps,
+        args.num_training_steps
+    )
 
-    decoder_optimizer = AdamW(decoder.parameters(), lr=args.decoder_lr, weight_decay=args.weight_decay, amsgrad=False)
-    decoder_scheduler = get_scheduler(args.scheduler, decoder_optimizer, args.num_warmup_steps, args.num_training_steps)
+    decoder_optimizer = AdamW(
+        decoder.parameters(),
+        lr=args.decoder_lr,
+        weight_decay=args.weight_decay,
+        amsgrad=False
+    )
+    decoder_scheduler = get_scheduler(
+        args.scheduler,
+        decoder_optimizer,
+        args.num_warmup_steps,
+        args.num_training_steps
+    )
 
     if load_path and args.resume:
         states = load_states(args, load_path)
@@ -217,16 +224,24 @@ def get_optimizer_and_scheduler(args, encoder, decoder, load_path=None):
         else:
             encoder_scheduler.load_state_dict(states['encoder_scheduler'])
             decoder_scheduler.load_state_dict(states['decoder_scheduler'])
-        print_rank_0(f"Optimizer loaded from {load_path}")
+        log_rank_0(f"Optimizer loaded from {load_path}")
 
     return encoder_optimizer, encoder_scheduler, decoder_optimizer, decoder_scheduler
 
 
-def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch,
-             encoder_scheduler, decoder_scheduler, scaler, device, global_step, SUMMARY, args):
+def train_fn(
+    args, train_loader, encoder, decoder, criterion,
+    encoder_optimizer, decoder_optimizer, epoch,
+    encoder_scheduler, decoder_scheduler,
+    scaler, device, global_step
+):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = LossMeter()
+    seq_acc_meter = LossMeter()
+    seq_acc_token_only_meter = LossMeter()
+    edge_tp_meter = LossMeter()
+
     # switch to train mode
     encoder.train()
     decoder.train()
@@ -248,10 +263,35 @@ def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         with torch.cuda.amp.autocast(enabled=args.fp16):
             features, hiddens = encoder(images, refs)
             results = decoder(features, hiddens, refs)
-            losses = criterion(results, refs)
+            losses, metrics = criterion(results, refs)
+
             loss = sum(losses.values())
+            seq_acc = metrics["seq_acc"]
+            seq_acc_token_only = metrics["seq_acc_token_only"]
+            edge_tp = metrics["edge_tp"]
+
         # record loss
-        loss_meter.update(loss, losses, batch_size)
+        loss_meter.update(
+            loss,
+            losses,
+            batch_size
+        )
+        seq_acc_meter.update(
+            seq_acc,
+            {k: v for k, v in metrics.items() if k == "seq_acc"},
+            batch_size
+        )
+        seq_acc_token_only_meter.update(
+            seq_acc_token_only,
+            {k: v for k, v in metrics.items() if k == "seq_acc_token_only"},
+            batch_size
+        )
+        edge_tp_meter.update(
+            edge_tp,
+            {k: v for k, v in metrics.items() if k == "edge_tp"},
+            batch_size
+        )
+
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
         scaler.scale(loss).backward()
@@ -273,24 +313,24 @@ def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         end = time.time()
         if step % args.print_freq == 0 or step == (len(train_loader) - 1):
             loss_str = ' '.join([f'{k}:{v.avg:.4f}' for k, v in loss_meter.subs.items()])
-            print_rank_0('Epoch: [{0}][{1}/{2}] '
-                         'Data {data_time.avg:.3f}s ({sum_data_time}) '
-                         'Run {remain:s} '
-                         'Loss: {loss.avg:.4f} ({loss_str}) '
-                         'Grad: {encoder_grad_norm:.3f}/{decoder_grad_norm:.3f} '
-                         'LR: {encoder_lr:.6f} {decoder_lr:.6f}'
-            .format(
-                epoch + 1, step, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=loss_meter, loss_str=loss_str,
-                sum_data_time=asMinutes(data_time.sum),
-                remain=timeSince(start, float(step + 1) / len(train_loader)),
-                encoder_grad_norm=encoder_grad_norm,
-                decoder_grad_norm=decoder_grad_norm,
-                encoder_lr=encoder_scheduler.get_lr()[0],
-                decoder_lr=decoder_scheduler.get_lr()[0]))
+            log_rank_0(
+                f"Epoch: [{epoch + 1}][{step}/{len(train_loader)}] "
+                f"Data {data_time.avg:.3f}s ({asMinutes(data_time.sum)}) "
+                f"Run {timeSince(start, float(step + 1) / len(train_loader)):s} "
+                f"Loss: {loss_meter.avg:.4f} ({loss_str}) "
+                f"Seq. acc.: {seq_acc_meter.avg:.4f} "
+                f"Seq. acc. token only: {seq_acc_token_only_meter.avg:.4f} "
+                f"Edge true pos: {edge_tp_meter.avg:.4f} "
+                f"Grad: {encoder_grad_norm:.3f}/{decoder_grad_norm:.3f} "
+                f"LR: {encoder_scheduler.get_lr()[0]:.6f} "
+                f"{decoder_scheduler.get_lr()[0]:.6f}"
+            )
             loss_meter.reset()
-        if args.train_steps_per_epoch != -1 and (
-                step + 1) // args.gradient_accumulation_steps == args.train_steps_per_epoch:
+            seq_acc_meter.reset()
+            seq_acc_token_only_meter.reset()
+            edge_tp_meter.reset()
+        if args.train_steps_per_epoch != -1 and \
+            (step + 1) // args.gradient_accumulation_steps == args.train_steps_per_epoch:
             break
 
     return loss_meter.epoch.avg, global_step
@@ -357,7 +397,13 @@ def valid_fn(valid_loader, encoder, decoder, criterion, tokenizer, device, args)
     return predictions
 
 
-def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
+def train_loop(
+    args,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    tokenizer: Dict[str, Any],
+    save_path: str
+) -> None:
     SUMMARY = None
 
     if args.local_rank == 0 and not args.debug:
@@ -365,7 +411,7 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
         save_args(args)
         SUMMARY = init_summary_writer(save_path)
 
-    print_rank_0("========== training ==========")
+    log_rank_0("========== training ==========")
 
     device = args.device
 
@@ -373,25 +419,24 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
     # loader
     # ====================================================
 
-    if aux_df is None:
-        train_dataset = TrainDataset(args, train_df, tokenizer, split='train', dynamic_indigo=args.dynamic_indigo)
-        print_rank_0(train_dataset.transform)
-    else:
-        train_dataset = AuxTrainDataset(args, train_df, aux_df, tokenizer)
+    train_dataset = TrainDataset(args, train_df, tokenizer, split="train")
+    log_rank_0(train_dataset.transform)
+
     if args.local_rank != -1:
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
     else:
         train_sampler = RandomSampler(train_dataset)
-    # TODO: may need to set timeout, as sometimes train_loader unexpectedly stucks
-    train_loader = DataLoader(train_dataset,
-                              batch_size=args.batch_size,
-                              sampler=train_sampler,
-                              num_workers=args.num_workers,
-                              prefetch_factor=4,
-                              persistent_workers=True,
-                              pin_memory=True,
-                              drop_last=True,
-                              collate_fn=bms_collate)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        prefetch_factor=4,
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=polymer_collate
+    )
 
     if args.train_steps_per_epoch == -1:
         args.train_steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
@@ -413,9 +458,6 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
     # ====================================================
     criterion = Criterion(args, tokenizer).to(device)
 
-    best_score = -np.inf
-    best_loss = np.inf
-
     global_step = encoder_scheduler.last_epoch
     start_epoch = global_step // args.train_steps_per_epoch
 
@@ -429,20 +471,42 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
 
         # train
         avg_loss, global_step = train_fn(
-            train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch,
-            encoder_scheduler, decoder_scheduler, scaler, device, global_step, SUMMARY, args)
+            args,
+            train_loader=train_loader,
+            encoder=encoder,
+            decoder=decoder,
+            criterion=criterion,
+            encoder_optimizer=encoder_optimizer,
+            decoder_optimizer=decoder_optimizer,
+            epoch=epoch,
+            encoder_scheduler=encoder_scheduler,
+            decoder_scheduler=decoder_scheduler,
+            scaler=scaler,
+            device=device,
+            global_step=global_step
+        )
 
         # eval
-        # scores = inference(args, valid_df, criterion, tokenizer, encoder, decoder, save_path, split='valid')
-        scores = inference(args, valid_df, criterion, tokenizer, encoder, decoder, save_path, split='train')
+        TODO
+        # FIXME
+        scores = inference(
+            args,
+            data_df=val_df,
+            criterion=criterion,
+            tokenizer=tokenizer,
+            encoder=encoder,
+            decoder=decoder,
+            save_path=save_path,
+            split="val"
+        )
 
         if args.local_rank > 0:
             continue
 
         elapsed = time.time() - start_time
 
-        print_rank_0(f'Epoch {epoch + 1} - Time: {elapsed:.0f}s')
-        print_rank_0(f'Epoch {epoch + 1} - Score: ' + json.dumps(scores))
+        log_rank_0(f"Epoch {epoch + 1} - Time: {elapsed:.0f}s")
+        log_rank_0(f"Epoch {epoch + 1} - Score: {json.dumps(scores)}")
 
         save_obj = {
             'encoder': encoder.state_dict(),
@@ -452,7 +516,10 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             'decoder_optimizer': decoder_optimizer.state_dict(),
             'decoder_scheduler': decoder_scheduler.state_dict(),
             'global_step': global_step,
-            'args': {key: args.__dict__[key] for key in ['formats', 'input_size', 'coord_bins', 'sep_xy']}
+            'args': {
+                key: args.__dict__[key]
+                for key in ['formats', 'input_size', 'coord_bins', 'sep_xy']
+            }
         }
 
         for name in ['post_smiles', 'graph_smiles', 'canon_smiles']:
@@ -469,23 +536,24 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             for key in scores:
                 SUMMARY.add_scalar(f'valid/{key}', scores[key], global_step)
 
-        # if score >= best_score:
-        #     best_score = score
-        #     print_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
-        #     torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
-        #     with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
-        #         json.dump(scores, f)
+        if score >= best_score:
+            best_score = score
+            log_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
+            torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
+            with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
+                json.dump(scores, f)
 
-        if args.save_mode == 'all':
+        if args.save_mode == "all":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_ep{epoch}.pth'))
-        if args.save_mode == 'last':
+        if args.save_mode == "last":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth'))
 
     if args.local_rank != -1:
         dist.barrier()
 
 
-def inference(args, data_df, criterion, tokenizer, encoder=None, decoder=None, save_path=None, split='test'):
+def inference(
+    args, data_df, criterion, tokenizer, encoder=None, decoder=None, save_path=None, split='test'):
     print_rank_0("========== inference ==========")
     print_rank_0(data_df.attrs['file'])
 
@@ -595,8 +663,6 @@ def inference(args, data_df, criterion, tokenizer, encoder=None, decoder=None, s
     print('Save predictions...')
     file = data_df.attrs['file'].split('/')[-1]
     pred_df = format_df(pred_df)
-    if args.predict_coords:
-        pred_df = pred_df[['image_id', 'SMILES', 'node_coords']]
     pred_df.to_csv(os.path.join(save_path, f'prediction_{file}'), index=False)
     # Save scores
     if split == 'test':
@@ -606,87 +672,96 @@ def inference(args, data_df, criterion, tokenizer, encoder=None, decoder=None, s
     return scores
 
 
-def get_chemdraw_data(args):
-    train_df, valid_df, test_df, aux_df = None, None, None, None
+def get_data(args) -> Tuple[
+    Optional[pd.DataFrame],
+    Optional[pd.DataFrame],
+    Optional[pd.DataFrame],
+    Dict[str, Any]
+]:
+    train_df, val_df, test_df = None, None, None
     if args.do_train:
-        train_files = args.train_file.split(',')
-        train_df = pd.concat([pd.read_csv(os.path.join(args.data_path, file)) for file in train_files])
-        print_rank_0(f'train.shape: {train_df.shape}')
-        if args.aux_file:
-            aux_df = pd.read_csv(os.path.join(args.data_path, args.aux_file))
-            print_rank_0(f'aux.shape: {aux_df.shape}')
-    if args.do_train or args.do_valid:
-        valid_df = pd.read_csv(os.path.join(args.data_path, args.valid_file))
-        valid_df.attrs['file'] = args.valid_file
-        print_rank_0(f'valid.shape: {valid_df.shape}')
+        train_files = args.train_files.split(',')
+        train_df = pd.concat([
+            pd.read_csv(os.path.join(args.data_path, file))
+            for file in train_files
+        ])
+        log_rank_0(f'train.shape: {train_df.shape}')
+    if args.do_train or args.do_val:
+        val_df = pd.read_csv(os.path.join(args.data_path, args.val_file))
+        val_df.attrs['file'] = args.val_file
+        log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:
-        test_files = args.test_file.split(',')
-        test_df = [pd.read_csv(os.path.join(args.data_path, file)) for file in test_files]
+        test_files = args.test_files.split(',')
+        test_df = [
+            pd.read_csv(os.path.join(args.data_path, file))
+            for file in test_files
+        ]
         for file, df in zip(test_files, test_df):
             df.attrs['file'] = file
-            print_rank_0(file + f' test.shape: {df.shape}')
+            log_rank_0(f'{file} test.shape: {df.shape}')
     tokenizer = get_tokenizer(args)
 
-    return train_df, valid_df, test_df, aux_df, tokenizer
+    return train_df, val_df, test_df, tokenizer
 
 
-def get_si_data(args):
-    train_df, valid_df, test_df, aux_df = None, None, None, None
-    if args.do_train:
-        train_files = args.train_file.split(',')
-        train_df = pd.concat([pd.read_csv(os.path.join(args.data_path, file)) for file in train_files])
-        print_rank_0(f'train.shape: {train_df.shape}')
-        if args.aux_file:
-            aux_df = pd.read_csv(os.path.join(args.data_path, args.aux_file))
-            print_rank_0(f'aux.shape: {aux_df.shape}')
-    if args.do_train or args.do_valid:
-        valid_df = pd.read_csv(os.path.join(args.data_path, args.valid_file))
-        valid_df.attrs['file'] = args.valid_file
-        print_rank_0(f'valid.shape: {valid_df.shape}')
-    if args.do_test:
-        test_files = args.test_file.split(',')
-        test_df = [pd.read_csv(os.path.join(args.data_path, file)) for file in test_files]
-        for file, df in zip(test_files, test_df):
-            df.attrs['file'] = file
-            print_rank_0(file + f' test.shape: {df.shape}')
-    tokenizer = get_tokenizer(args)
-
-    return train_df, valid_df, test_df, aux_df, tokenizer
-
-
-def main():
-    args = get_args()
+def main(args):
     seed_torch(seed=args.seed)
 
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if args.local_rank != -1:
-        dist.init_process_group(backend=args.backend, init_method='env://', timeout=datetime.timedelta(0, 14400))
+        dist.init_process_group(
+            backend=args.backend,
+            init_method='env://',
+            timeout=datetime.timedelta(0, 14400)
+        )
         torch.cuda.set_device(args.local_rank)
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
 
     args.formats = args.formats.split(',')
-    args.nodes = any([f in args.formats for f in ['atomtok_coords', 'chartok_coords']])
-    args.edges = any([f in args.formats for f in ['atomtok_coords', 'chartok_coords']])
-    print_rank_0('Output formats: ' + ' '.join(args.formats))
+    args.nodes = True
+    args.edges = True
+    log_rank_0('Output formats: ' + ' '.join(args.formats))
 
-    # train_df, valid_df, test_df, aux_df, tokenizer = get_chemdraw_data(args)
-    train_df, valid_df, _, aux_df, tokenizer = get_si_data(args)
+    train_df, val_df, test_df, tokenizer = get_data(args)
 
     if args.do_train:
-        train_loop(args, train_df, valid_df, aux_df, tokenizer, args.save_path)
+        train_loop(
+            args,
+            train_df=train_df,
+            val_df=val_df,
+            tokenizer=tokenizer,
+            save_path=args.save_path
+        )
 
-    if args.do_valid:
-        scores = inference(args, valid_df, tokenizer, save_path=args.save_path, split='test')
-        print_rank_0(json.dumps(scores, indent=4))
+    if args.do_val:
+        scores = inference(
+            args,
+            data_df=val_df,
+            criterion=None,
+            tokenizer=tokenizer,
+            save_path=args.save_path,
+            split="val"
+        )
+        log_rank_0(json.dumps(scores, indent=4))
 
     if args.do_test:
         assert type(test_df) is list
         for df in test_df:
-            scores = inference(args, df, tokenizer, save_path=args.save_path, split='test')
-            print_rank_0(json.dumps(scores, indent=4))
+            scores = inference(
+                args,
+                data_df=df,
+                criterion=None,
+                tokenizer=tokenizer,
+                save_path=args.save_path,
+                split="test"
+            )
+            log_rank_0(json.dumps(scores, indent=4))
 
 
 if __name__ == "__main__":
-    main()
+    args = get_args()
+    logger = init_logger(args)
+
+    main(args)

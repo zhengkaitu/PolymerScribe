@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.optimize import linear_sum_assignment
+from typing import Any, Dict, Tuple
 from .tokenizer import PAD_ID, MASK, MASK_ID
 
 
@@ -107,11 +107,31 @@ class Criterion(nn.Module):
                     ignore_indices = [PAD_ID, MASK_ID]
                 else:
                     ignore_indices = []
-                criterion[format_] = SequenceLoss(args.label_smoothing, len(tokenizer[format_]),
-                                                  ignore_index=PAD_ID, ignore_indices=ignore_indices)
+                criterion[format_] = SequenceLoss(
+                    args.label_smoothing,
+                    len(tokenizer[format_]),
+                    ignore_index=PAD_ID,
+                    ignore_indices=ignore_indices
+                )
         self.criterion = nn.ModuleDict(criterion)
 
-    def forward(self, results, refs):
+    @staticmethod
+    def get_seq_acc(
+        results: Dict[str, Any],
+        refs: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        predictions, targets, *_ = results["chartok_coords"]
+        atom_indices = predictions["indices"]
+        atom_indices_targets = refs["atom_indices"]
+
+
+        return seq_acc, seq_acc_token_only
+
+    def forward(
+        self,
+        results,
+        refs
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         losses = {}
         for format_ in results:
             predictions, targets, *_ = results[format_]
@@ -122,4 +142,14 @@ class Criterion(nn.Module):
                 if loss_.numel() > 1:
                     loss_ = loss_.mean()
                 losses[format_] = loss_
-        return losses
+
+        seq_acc, seq_acc_token_only = self.get_seq_acc(results, refs)
+        edge_tp = self.get_edge_tp(results, refs)
+
+        metrics = {
+            "seq_acc": seq_acc,
+            "seq_acc_token_only": seq_acc_token_only,
+            "edge_tp": edge_tp
+        }
+
+        return losses, metrics

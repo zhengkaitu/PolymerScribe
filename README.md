@@ -8,7 +8,7 @@ structure, and subsequently to BigSMILES.
 ### Environment setup
 
 ```shell
-$ conda create -y -n polymerscribe python=3.9
+$ conda create -y -n polymerscribe python=3.9 ipykernel jupyterlab==4.0.13 packaging==21.3
 $ conda activate polymerscribe
 $ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
 $ pip install -r requirements.txt
