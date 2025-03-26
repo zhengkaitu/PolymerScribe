@@ -231,20 +231,13 @@ class GraphPredictor(nn.Module):
     def __init__(
         self,
         decoder_dim: int,
-        num_bond_type: int,
-        coords=False
+        num_bond_type: int
     ):
-        super(GraphPredictor, self).__init__()
-        self.coords = coords
+        super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
             nn.Linear(decoder_dim, num_bond_type)
         )
-        if coords:
-            self.coords_mlp = nn.Sequential(
-                nn.Linear(decoder_dim, decoder_dim), nn.GELU(),
-                nn.Linear(decoder_dim, 2)
-            )
 
     def forward(self, hidden, indices=None):
         b, l, dim = hidden.size()
@@ -259,8 +252,7 @@ class GraphPredictor(nn.Module):
         results = {}
         hh = torch.cat([hidden.unsqueeze(2).expand(b, l, l, dim), hidden.unsqueeze(1).expand(b, l, l, dim)], dim=3)
         results['edges'] = self.mlp(hh).permute(0, 3, 1, 2)
-        if self.coords:
-            results['coords'] = self.coords_mlp(hidden)
+
         return results
 
 
@@ -298,31 +290,33 @@ class Decoder(nn.Module):
             if format_ == 'edges':
                 decoder['edges'] = GraphPredictor(
                     decoder_dim=args.dec_hidden_size,
-                    num_bond_type=args.num_bond_type,
-                    coords=args.continuous_coords
+                    num_bond_type=args.num_bond_type
                 )
             else:
                 decoder[format_] = TransformerDecoderAR(args, tokenizer[format_])
         self.decoder = nn.ModuleDict(decoder)
         self.compute_confidence = args.compute_confidence
 
-    def forward(self, encoder_out, hiddens, refs):
+    def forward(self, encoder_out, refs):
         """Training mode. Compute the logits with teacher forcing."""
         results = {}
         refs = to_device(refs, encoder_out.device)
-        for format_ in self.formats:
-            if format_ == 'edges':
-                assert 'chartok_coords' in results
-                dec_out = results['chartok_coords'][2]
-                predictions = self.decoder['edges'](dec_out, indices=refs['atom_indices'][0])
 
-                targets = {'edges': refs['edges']}
-                if 'coords' in predictions:
-                    targets['coords'] = refs['coords']
-                results['edges'] = (predictions, targets)
-            else:
-                labels, label_lengths = refs[format_]
-                results[format_] = self.decoder[format_](encoder_out, labels, label_lengths)
+        labels, label_lengths = refs["chartok_coords"]
+        results["chartok_coords"] = self.decoder["chartok_coords"](
+            encoder_out=encoder_out,
+            labels=labels,
+            label_lengths=label_lengths
+        )
+
+        dec_out = results['chartok_coords'][2]
+        predictions = self.decoder['edges'](
+            hidden=dec_out,
+            indices=refs['atom_indices'][0]
+        )
+        targets = {"edges": refs['edges']}
+        results["edges"] = (predictions, targets)
+
         return results
 
     def decode(self, encoder_out, hiddens=None, refs=None, beam_size=1, n_best=1):
