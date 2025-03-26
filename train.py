@@ -142,8 +142,25 @@ def safe_load_with_shape_change(module, module_states) -> None:
     pretrained_state_dict = remove_prefix(module_states)
 
     # Extension for sequence decoder
+    output_w = new_state_dict["decoder.chartok_coords.output_layer.weight"]
+    output_b = new_state_dict["decoder.chartok_coords.output_layer.bias"]
+    emb_luts = new_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"]
 
+    pretrained_param = pretrained_state_dict["decoder.chartok_coords.output_layer.weight"]
+    pretrained_dim = pretrained_param.size(0)
+    output_w[:pretrained_dim] = pretrained_param
 
+    pretrained_param = pretrained_state_dict["decoder.chartok_coords.output_layer.bias"]
+    pretrained_dim = pretrained_param.size(0)
+    output_b[:pretrained_dim] = pretrained_param
+    # print(f"Pretrained output_b: {pretrained_param}, shape: {pretrained_param.size()}")
+    # print(f"New output_b: {output_b}, shape: {output_b.size()}")
+
+    pretrained_param = pretrained_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"]
+    pretrained_dim = pretrained_param.size(0)
+    emb_luts[:pretrained_dim] = pretrained_param
+
+    """
     # Extension for edge decoder (GraphPredictor)
 
     mlp_2_w = new_state_dict["decoder.edges.mlp.2.weight"]
@@ -158,6 +175,7 @@ def safe_load_with_shape_change(module, module_states) -> None:
     new_state_dict["decoder.edges.mlp.2.weight"] = mlp_2_w
     new_state_dict["decoder.edges.mlp.2.bias"] = mlp_2_b
     # print(f"mlp_2_b to be loaded into the new module: {mlp_2_b}")
+    """
 
     module.load_state_dict(new_state_dict)
 
@@ -261,8 +279,8 @@ def train_fn(
         images = images.to(device)
         batch_size = images.size(0)
         with torch.cuda.amp.autocast(enabled=args.fp16):
-            features, hiddens = encoder(images, refs)
-            results = decoder(features, hiddens, refs)
+            features, hiddens = encoder(images)
+            results = decoder(encoder_out=features, refs=refs)
             losses, metrics = criterion(results, refs)
 
             loss = sum(losses.values())
@@ -336,7 +354,7 @@ def train_fn(
     return loss_meter.epoch.avg, global_step
 
 
-def valid_fn(valid_loader, encoder, decoder, criterion, tokenizer, device, args):
+def val_fn(valiloader, encoder, decoder, criterion, tokenizer, device, args):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = LossMeter()
@@ -350,14 +368,14 @@ def valid_fn(valid_loader, encoder, decoder, criterion, tokenizer, device, args)
     start = end = time.time()
     # Inference is distributed. The batch is divided and run independently on multiple GPUs, and the predictions
     # are gathered afterward.
-    for step, (indices, images, refs) in enumerate(valid_loader):
+    for step, (indices, images, refs) in enumerate(val_loader):
         # measure data loading time
         data_time.update(time.time() - end)
         images = images.to(device)
         batch_size = images.size(0)
         with torch.cuda.amp.autocast(enabled=args.fp16):
             with torch.no_grad():
-                features, hiddens = encoder(images, refs)
+                features, hiddens = encoder(images)
                 results = decoder(features, hiddens, refs)
                 losses = criterion(results, refs)
                 loss = sum(losses.values())
@@ -374,7 +392,7 @@ def valid_fn(valid_loader, encoder, decoder, criterion, tokenizer, device, args)
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-        if step % args.print_freq == 0 or step == (len(valid_loader) - 1):
+        if step % args.print_freq == 0 or step == (len(val_loader) - 1):
             loss_str = ' '.join([f'{k}:{v.avg:.4f}' for k, v in loss_meter.subs.items()])
             print_rank_0('EVAL: [{0}/{1}] '
                          'Data {data_time.avg:.3f}s ({sum_data_time}) '

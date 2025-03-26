@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from onmt.utils.misc import sequence_mask
 from typing import Any, Dict, Tuple
 from .tokenizer import PAD_ID, MASK, MASK_ID
+from .utils import to_device
 
 
 class LabelSmoothingLoss(nn.Module):
@@ -66,31 +68,26 @@ class SequenceLoss(nn.Module):
             if idx != self.ignore_index:
                 target.masked_fill_((target == idx), self.ignore_index)
         loss = self.criterion(output, target)
+
         return loss
 
 
 class GraphLoss(nn.Module):
 
-    def __init__(self):
-        super(GraphLoss, self).__init__()
-        weight = torch.ones(9) * 10
+    def __init__(self, num_edge_type):
+        super().__init__()
+        weight = torch.ones(num_edge_type) * 10
         weight[0] = 1
         self.criterion = nn.CrossEntropyLoss(weight, ignore_index=-100)
 
     def forward(self, outputs, targets):
         results = {}
-        if 'coords' in outputs:
-            pred = outputs['coords']
-            max_len = pred.size(1)
-            target = targets['coords'][:, :max_len]
-            mask = target.ge(0)
-            loss = F.l1_loss(pred, target, reduction='none')
-            results['coords'] = (loss * mask).sum() / mask.sum()
         if 'edges' in outputs:
             pred = outputs['edges']
             max_len = pred.size(-1)
             target = targets['edges'][:, :max_len, :max_len]
             results['edges'] = self.criterion(pred, target)
+
         return results
 
 
@@ -101,7 +98,7 @@ class Criterion(nn.Module):
         criterion = {}
         for format_ in args.formats:
             if format_ == 'edges':
-                criterion['edges'] = GraphLoss()
+                criterion['edges'] = GraphLoss(num_edge_type=7)
             else:
                 if MASK in tokenizer[format_].stoi:
                     ignore_indices = [PAD_ID, MASK_ID]
@@ -120,10 +117,54 @@ class Criterion(nn.Module):
         results: Dict[str, Any],
         refs: Dict[str, Any]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        predictions, targets, *_ = results["chartok_coords"]
-        atom_indices = predictions["indices"]
-        atom_indices_targets = refs["atom_indices"]
+        logits, targets, dec_out = results["chartok_coords"]
+        indices, indices_lengths = refs["full_atom_indices"]
 
+        # print(f"predictions: {predictions}")
+        # print(f"targets: {[t for t in targets]}")
+        # print(f"atom_indices_targets: {atom_indices_targets}")
+
+        # aliasing to respect the original gathering logic
+        # pop last, and then insert 0 at the start
+        # NOTE that this is different from the positions of the node embeddings!
+        # also it still keeps the index corresponding to EOS, should be fine if fed with the lengths though.
+        # indices = atom_indices[:, :-1]
+        # m = nn.ConstantPad1d((1, 0), 0)
+        # indices = m(indices)
+
+        predicted_ids = torch.argmax(logits, dim=-1)        # (b, t, v) -> (b, t)
+        target_mask = (targets != PAD_ID).long()
+        seq_accs = (predicted_ids == targets).float()
+        seq_accs = seq_accs * target_mask
+        seq_acc = seq_accs.sum() / target_mask.sum()
+
+        b, t, v = logits.size()
+        # print(f"logits size: {logits.size()}")
+
+        batch_id = torch.arange(b).unsqueeze(1).expand_as(indices).reshape(-1)
+        indices = indices.view(-1)
+        # print(f"atom_indices: {atom_indices}, shape: {atom_indices.size()}")
+        # print(f"indices: {indices}, shape: {indices.size()}")
+        # print(f"batch_id: {batch_id}, shape: {batch_id.size()}")
+        gathered_predicted_ids = predicted_ids[batch_id, indices].view(b, -1)
+        gathered_targets = targets[batch_id, indices].view(b, -1)
+        # b, l, dim = hidden.size()
+
+        # print(f"gathered_predicted_ids: {gathered_predicted_ids}")
+        # print(f"gathered_targets size: {gathered_targets.size()}")
+        # print(f"atom_indices_lengths: {atom_indices_lengths}")
+        # print(f"gathered_targets: {gathered_targets}")
+
+        gathered_target_mask = sequence_mask(
+            indices_lengths.squeeze(),
+            torch.max(indices_lengths)
+        )
+        gathered_target_mask = to_device(gathered_target_mask, gathered_predicted_ids.device)
+        # print(f"gathered_target_mask: {gathered_target_mask}")
+
+        seq_accs_token_only = (gathered_predicted_ids == gathered_targets).float()
+        seq_accs_token_only = seq_accs_token_only * gathered_target_mask
+        seq_acc_token_only = seq_accs_token_only.sum() / gathered_target_mask.sum()
 
         return seq_acc, seq_acc_token_only
 
@@ -144,7 +185,8 @@ class Criterion(nn.Module):
                 losses[format_] = loss_
 
         seq_acc, seq_acc_token_only = self.get_seq_acc(results, refs)
-        edge_tp = self.get_edge_tp(results, refs)
+        # edge_tp = self.get_edge_tp(results, refs)
+        edge_tp = seq_acc
 
         metrics = {
             "seq_acc": seq_acc,
