@@ -168,6 +168,32 @@ class Criterion(nn.Module):
 
         return seq_acc, seq_acc_token_only
 
+    @staticmethod
+    def get_edge_tp(
+        results: Dict[str, Any],
+        refs: Dict[str, Any]
+    ) -> torch.Tensor:
+        logits, targets = results["edges"]
+        logits = logits["edges"]
+        targets = targets["edges"]
+        max_len = logits.size(-1)
+        targets = targets[:, :max_len, :max_len]
+        # print(f"edge logits: {logits}")
+        # print(f"edge targets: {targets}")
+
+        predicted_edge_ids = torch.argmax(logits, dim=1)       # (b, h, t, t) -> (b, t, t)
+        # print(f"predicted_edge_ids: {[i for i in predicted_edge_ids]}")
+        # print(f"edge targets: {[i for i in targets]}")
+        # print(f"predicted_edge_ids size: {predicted_edge_ids.size()}")
+        # print(f"targets size: {targets.size()}")
+
+        target_mask = (targets > 0).long()
+        edge_tps = (predicted_edge_ids == targets).float()
+        edge_tps = edge_tps * target_mask
+        edge_tp = edge_tps.sum() / target_mask.sum()
+
+        return edge_tp
+
     def forward(
         self,
         results,
@@ -185,8 +211,7 @@ class Criterion(nn.Module):
                 losses[format_] = loss_
 
         seq_acc, seq_acc_token_only = self.get_seq_acc(results, refs)
-        # edge_tp = self.get_edge_tp(results, refs)
-        edge_tp = seq_acc
+        edge_tp = self.get_edge_tp(results, refs)
 
         metrics = {
             "seq_acc": seq_acc,
