@@ -181,8 +181,18 @@ class TrainDataset(Dataset):
         indices = [i for i in indices if i < max_len]
         ref['atom_indices'] = torch.LongTensor(indices)
 
+        assert indices[0] > 0
+        full_indices = [0]
+        for i in indices:
+            if i == 0:      # ignore paddings
+                break
+            while full_indices[-1] < i - 3:     # append +1 until the gap is 3
+                full_indices.append(full_indices[-1] + 1)
+            full_indices.append(i)
+        ref["full_atom_indices"] = torch.LongTensor(full_indices)
+
         assert not tokenizer.continuous_coords
-        assert "edge" in self.df.columns
+        assert "edges" in self.df.columns
         edge_list = eval(self.df.loc[idx, 'edges'])
         n = len(indices)
         edges = torch.zeros((n, n), dtype=torch.long)
@@ -219,8 +229,10 @@ def polymer_collate(batch):
     imgs = []
     batch = [ex for ex in batch if ex[1] is not None]
     formats = list(batch[0][2].keys())
-    seq_formats = [k for k in formats if
-                   k in ['atomtok', 'inchi', 'nodes', 'atomtok_coords', 'chartok_coords', 'atom_indices']]
+    seq_formats = [
+        k for k in formats
+        if k in ["chartok_coords", "atom_indices", "full_atom_indices"]
+    ]
     refs = {key: [[], []] for key in seq_formats}
     for ex in batch:
         ids.append(ex[0])
@@ -243,4 +255,19 @@ def polymer_collate(batch):
              for edges in edges_list],
             dim=0
         )
+
+    """
+    # print(f"id: {ids[0]}")
+    # print(f"chartok_coords: {refs['chartok_coords'][0][0]}")
+    # print(f"chartok_coords shape: {refs['chartok_coords'][1][0]}")
+    # print(f"atom_indices: {refs['atom_indices'][0][0]}")
+    # print(f"atom_indices shape: {refs['atom_indices'][1][0]}")
+    # 
+    # exit(0)
+    tensor([1, 81, 101, 194, 57, 122, 211, 57, 143, 194, 12, 81, 164, 211,
+            13, 12, 60, 131, 165, 13, 60, 155, 165, 229, 230, 111, 228, 231,
+            111, 177, 230, 59, 75, 154, 177, 231, 42, 154, 228, 2])
+    for 104.mol/svg
+    """
+
     return ids, pad_images(imgs), refs
