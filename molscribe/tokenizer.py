@@ -3,7 +3,7 @@ import json
 import numpy as np
 import random
 from SmilesPE.pretokenizer import atomwise_tokenizer
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 PAD = '<pad>'
 SOS = '<sos>'
@@ -59,9 +59,12 @@ class NodeTokenizer(Tokenizer):
             BRA: self.offset + self.maxx + self.maxy + 1,
             KET: self.offset + self.maxx + self.maxy + 2
         }
+        self.itos_ext = {v: k for k, v in self.stoi_ext.items()}
+        self.itos_combined = self.itos | self.itos_ext
 
     def __len__(self):
         assert self.sep_xy
+        # return self.offset + self.maxx + self.maxy
         return self.offset + self.maxx + self.maxy + self.ext_size
 
     @property
@@ -143,13 +146,40 @@ class CharTokenizer(NodeTokenizer):
         assert self.stoi[MASK] == MASK_ID
         self.itos = {item[1]: item[0] for item in self.stoi.items()}
 
-    def get_output_mask(self, id):
+    def get_output_mask(self, id, next_bracket_token: str):
         """TO FIX"""
         mask = [False] * len(self)
         if self.is_x(id):
-            return [True] * (self.offset + self.maxx) + [False] * self.maxy
+            # if x, want y exclusively => mask non-y
+            # return [True] * (self.offset + self.maxx) + [False] * self.maxy
+            mask = (
+                [True] * (self.offset + self.maxx) +
+                [False] * self.maxy +
+                [True] * self.ext_size
+            )
+            return mask
         if self.is_y(id):
-            return [False] * self.offset + [True] * (self.maxx + self.maxy)
+            # if y, don't want x or y => mask x and y
+            # return [False] * self.offset + [True] * (self.maxx + self.maxy)
+            mask = (
+                [False] * self.offset +
+                [True] * (self.maxx + self.maxy) +
+                [False] * self.ext_size
+            )
+        if next_bracket_token == "<bra>":
+            # if next is <bra>, mask <ket>
+            mask[-1] = True
+        if next_bracket_token == "<ket>":
+            # print("masking <bra>!!!!!!!!!!!!!!!!!!")
+            # if next is <ket>, mask <bra>
+            mask[-2] = True
+        if next_bracket_token in ["bra_xy", "ket_xy"]:
+            # if x and y have yet to be generated
+            # wlog (due to the first if), if x has yet to be generated,
+            # mask <bra> and <ket> (and y?)
+            mask[-2] = True
+            mask[-1] = True
+
         return mask
 
     def smiles_and_bracket_to_sequence(
@@ -199,15 +229,21 @@ class CharTokenizer(NodeTokenizer):
 
         return labels, indices
 
-    def sequence_to_smiles(self, sequence):
+    def sequence_to_smiles_and_bracket(
+        self,
+        sequence: List[int]
+    ) -> Dict[str, Any]:
         # sequence = [1, 81, 101, 207, 57, 122, 186, 57, 143, 207, 81, 164, 186, 2]
-        has_coords = not self.continuous_coords
-        smiles = ''
+        assert not self.continuous_coords
+        smiles = ""
         coords, symbols, indices = [], [], []
         i = 0
         while i < len(sequence):
             label = sequence[i]
-            if label == EOS_ID or label == PAD_ID:
+            if label in [EOS_ID, PAD_ID]:
+                break
+            if label in self.itos_ext:
+                # exit for the second while loop; i shouldn't be the end yet
                 break
             if self.is_x(label) or self.is_y(label):
                 i += 1
@@ -226,31 +262,75 @@ class CharTokenizer(NodeTokenizer):
                         break
                     j += 1
             else:
-                if i+1 < len(sequence) and (self.itos[label] == 'C' and self.is_symbol(sequence[i+1]) and self.itos[sequence[i+1]] == 'l' \
-                        or self.itos[label] == 'B' and self.is_symbol(sequence[i+1]) and self.itos[sequence[i+1]] == 'r'):
-                    j = i+2
+                if i + 1 < len(sequence) \
+                    and (
+                        self.itos[label] == 'C'
+                        and self.is_symbol(sequence[i+1])
+                        and self.itos[sequence[i+1]] == 'l'
+                    ) or (
+                        self.itos[label] == 'B'
+                        and self.is_symbol(sequence[i+1])
+                        and self.itos[sequence[i+1]] == 'r'
+                    ):
+                    j = i + 2
                 else:
-                    j = i+1
+                    j = i + 1
             token = ''.join(self.itos[sequence[k]] for k in range(i, j))
             smiles += token
-            if has_coords:
-                if j+2 < len(sequence) and self.is_x(sequence[j]) and self.is_y(sequence[j+1]):
-                    x = self.id_to_x(sequence[j])
-                    y = self.id_to_y(sequence[j+1])
-                    coords.append([x, y])
-                    symbols.append(token)
-                    indices.append(j+2)
-                    i = j+2
-                else:
-                    i = j
+            if j + 2 < len(sequence) and self.is_x(sequence[j]) and self.is_y(sequence[j+1]):
+                x = self.id_to_x(sequence[j])
+                y = self.id_to_y(sequence[j+1])
+                coords.append([x, y])
+                symbols.append(token)
+                indices.append(j + 2)
+                i = j + 2
             else:
-                if j < len(sequence):
-                    symbols.append(token)
-                    indices.append(j)
                 i = j
-        results = {'smiles': smiles, 'symbols': symbols, 'indices': indices}
-        if has_coords:
-            results['coords'] = coords
+
+        bracket_symbols = []
+        bracket_coords = []
+        while i < len(sequence):
+            label = sequence[i]
+            if label in [EOS_ID, PAD_ID]:
+                break
+            # scan until BRA or KET
+            if self.itos_ext.get(label) == SEP:
+                i += 1
+                continue
+            if self.is_x(label) or self.is_y(label):
+                i += 1
+                continue
+            if self.itos_ext.get(label) not in [BRA, KET]:
+                i += 1
+                continue
+
+            j = i + 1
+            while j < len(sequence):
+                if not self.is_symbol(sequence[j]):
+                    break
+                j += 1
+            token = "".join(
+                self.itos_combined[sequence[k]] for k in range(i, j)
+            )
+            if j + 2 < len(sequence) and self.is_x(sequence[j]) and self.is_y(sequence[j+1]):
+                x = self.id_to_x(sequence[j])
+                y = self.id_to_y(sequence[j+1])
+                bracket_coords.append([x, y])
+                bracket_symbols.append(token)
+                i = j + 2
+            else:
+                i = j
+
+        results = {
+            'smiles': smiles,
+            'symbols': symbols,
+            'indices': indices,
+            "coords": coords,
+            "bracket_symbols": bracket_symbols,
+            "bracket_coords": bracket_coords,
+            "sequence": sequence
+        }
+
         return results
 
 

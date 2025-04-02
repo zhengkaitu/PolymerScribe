@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from .inference import GreedySearch, BeamSearch
 from .tokenizer import SOS_ID, EOS_ID, PAD_ID, MASK_ID
 from .transformer import TransformerDecoder, Embeddings
-from .utils import FORMAT_INFO, to_device
+from .utils import FORMAT_INFO, log_rank_0, to_device
 
 
 class Encoder(nn.Module):
@@ -107,8 +107,7 @@ class TransformerDecoderAR(nn.Module):
 
     def decode(
         self, encoder_out, beam_size: int,
-        n_best: int, min_length: int = 1, max_length: int = 256,
-        labels=None
+        n_best: int, min_length: int = 1, max_length: int = 256
     ):
         """
         Inference mode. Autoregressively decode the sequence.
@@ -118,7 +117,7 @@ class TransformerDecoderAR(nn.Module):
         """
         batch_size, max_len, _ = encoder_out.size()
         memory_bank = self.enc_transform(encoder_out)
-        orig_labels = labels
+        # orig_labels = labels
 
         if beam_size == 1:
             decode_strategy = GreedySearch(
@@ -158,28 +157,61 @@ class TransformerDecoderAR(nn.Module):
         parallel_paths = decode_strategy.parallel_paths
 
         # (3) Begin decoding step by step:
+        next_bracket_tokens = ["<bra>"] * batch_size
         for step in range(decode_strategy.max_length):
             tgt = decode_strategy.current_predictions.view(-1, 1, 1)
-            if labels is not None:
-                label = labels[:, step].view(-1, 1, 1)
-                mask = label.eq(MASK_ID).long()
-                tgt = tgt * mask + label * (1 - mask)
+            assert len(next_bracket_tokens) == len(tgt.view(-1).tolist())
+            # bracket constraints
+            for i, t in enumerate(tgt.view(-1).tolist()):
+                if self.tokenizer.itos_combined.get(t) == "<bra>":
+                    next_bracket_tokens[i] = "bra_xy"
+                elif self.tokenizer.itos_combined.get(t) == "<ket>":
+                    next_bracket_tokens[i] = "ket_xy"
+                elif self.tokenizer.is_y(t):
+                    if next_bracket_tokens[i] == "bra_xy":
+                        next_bracket_tokens[i] = "<ket>"
+                    elif next_bracket_tokens[i] == "ket_xy":
+                        next_bracket_tokens[i] = "<bra>"
+            # if len(tgt.view(-1).tolist()) > 3:
+            #     log_rank_0(f"step: {step}, tgt: {tgt.view(-1).tolist()[3]}, next: {next_bracket_tokens[3]}")
+
+            # if labels is not None:
+            #     label = labels[:, step].view(-1, 1, 1)
+            #     mask = label.eq(MASK_ID).long()
+            #     tgt = tgt * mask + label * (1 - mask)
             tgt_emb, tgt_pad_mask = self.dec_embedding(tgt)
-            dec_out, dec_attn, *_ = self.decoder(tgt_emb=tgt_emb, memory_bank=memory_bank,
-                                                 tgt_pad_mask=tgt_pad_mask, step=step)
+            dec_out, dec_attn, *_ = self.decoder(
+                tgt_emb=tgt_emb,
+                memory_bank=memory_bank,
+                tgt_pad_mask=tgt_pad_mask,
+                step=step
+            )
 
             attn = dec_attn.get("std", None)
 
-            dec_logits = self.output_layer(dec_out)  # [b, t, h] => [b, t, v]
-            dec_logits = dec_logits.squeeze(1)
+            dec_logits = self.output_layer(dec_out)     # (b, 1, h) => (b, 1, v)
+            dec_logits = dec_logits.squeeze(1)          # (b, 1, v) => (b, v)
             log_probs = F.log_softmax(dec_logits, dim=-1)
 
             if self.tokenizer.output_constraint:
-                output_mask = [self.tokenizer.get_output_mask(id) for id in tgt.view(-1).tolist()]
+                output_mask = [
+                    self.tokenizer.get_output_mask(id, next_bracket_token)
+                    for id, next_bracket_token in zip(
+                        tgt.view(-1).tolist(), next_bracket_tokens
+                    )
+                ]
                 output_mask = torch.tensor(output_mask, device=log_probs.device)
-                log_probs.masked_fill_(output_mask, -10000)
+                log_probs.masked_fill_(output_mask, -1e4)
 
-            label = labels[:, step + 1] if labels is not None and step + 1 < labels.size(1) else None
+            # print(f"log_probs size: {log_probs.size()}")
+            # # (b, v)
+            # print(f"tgt.view(-1) size: {tgt.view(-1).size()}")
+            # # (b,)
+            # print(f"output_mask size: {output_mask.size()}")
+            # # (b, v)
+
+            # label = labels[:, step + 1] if labels is not None and step + 1 < labels.size(1) else None
+            label = None
             decode_strategy.advance(log_probs, attn, dec_out, label)
             any_finished = decode_strategy.is_finished.any()
             if any_finished:
@@ -191,8 +223,11 @@ class TransformerDecoderAR(nn.Module):
             if any_finished:
                 # Reorder states.
                 memory_bank = memory_bank.index_select(0, select_indices)
-                if labels is not None:
-                    labels = labels.index_select(0, select_indices)
+                # if labels is not None:
+                #     labels = labels.index_select(0, select_indices)
+
+                # shrink bracket ref; VERY IMPORTANT
+                next_bracket_tokens = [next_bracket_tokens[i] for i in select_indices]
 
             if parallel_paths > 1 or any_finished:
                 self.map_state(lambda state, dim: state.index_select(dim, select_indices))
@@ -202,13 +237,13 @@ class TransformerDecoderAR(nn.Module):
         results["predictions"] = decode_strategy.predictions
         results["attention"] = decode_strategy.attention
         results["hidden"] = decode_strategy.hidden
-        if orig_labels is not None:
-            for i in range(batch_size):
-                pred = results["predictions"][i][0]
-                label = orig_labels[i][1:len(pred) + 1]
-                mask = label.eq(MASK_ID).long()
-                pred = pred[:len(label)]
-                results["predictions"][i][0] = pred * mask + label * (1 - mask)
+        # if orig_labels is not None:
+        #     for i in range(batch_size):
+        #         pred = results["predictions"][i][0]
+        #         label = orig_labels[i][1:len(pred) + 1]
+        #         mask = label.eq(MASK_ID).long()
+        #         pred = pred[:len(label)]
+        #         results["predictions"][i][0] = pred * mask + label * (1 - mask)
 
         return results["predictions"], results['scores'], results["token_scores"], results["hidden"]
 
@@ -319,51 +354,64 @@ class Decoder(nn.Module):
 
         return results
 
-    def decode(self, encoder_out, hiddens=None, refs=None, beam_size=1, n_best=1):
-        """Inference mode. Call each decoder's decode method (if required), convert the output format (e.g. token to
+    def decode(self, encoder_out, beam_size=1, n_best=1):
+        """Inference mode. Call each decoder's decode method (if required),
+        convert the output format (e.g. token to
         sequence). Beam search is not supported yet."""
         results = {}
-        predictions = []
-        for format_ in self.formats:
-            if format_ == "chartok_coords":
-                max_len = FORMAT_INFO[format_]['max_len']
-                results[format_] = self.decoder[format_].decode(encoder_out, beam_size, n_best, max_length=max_len)
-                outputs, scores, token_scores, *_ = results[format_]
-                beam_preds = [[self.tokenizer[format_].sequence_to_smiles(x.tolist()) for x in pred]
-                              for pred in outputs]
-                predictions = [{format_: pred[0]} for pred in beam_preds]
-                if self.compute_confidence:
-                    for i in range(len(predictions)):
-                        # -1: y score, -2: x score, -3: symbol score
-                        indices = np.array(predictions[i][format_]['indices']) - 3
-                        if format_ == 'chartok_coords':
-                            atom_scores = []
-                            for symbol, index in zip(predictions[i][format_]['symbols'], indices):
-                                atom_score = (np.prod(token_scores[i][0][index - len(symbol) + 1:index + 1])
-                                              ** (1 / len(symbol))).item()
-                                atom_scores.append(atom_score)
-                        else:
-                            atom_scores = np.array(token_scores[i][0])[indices].tolist()
-                        predictions[i][format_]['atom_scores'] = atom_scores
-                        predictions[i][format_]['average_token_score'] = scores[i][0]
-            if format_ == 'edges':
-                assert "chartok_coords" in results
-                atom_format = "chartok_coords"
-                dec_out = results[atom_format][3]  # batch x n_best x len x dim
-                for i in range(len(dec_out)):
-                    hidden = dec_out[i][0].unsqueeze(0)  # 1 * len * dim
-                    indices = torch.LongTensor(predictions[i][atom_format]['indices']).unsqueeze(0)  # 1 * k
-                    pred = self.decoder['edges'](hidden, indices)  # k * k
-                    prob = F.softmax(pred['edges'].squeeze(0).permute(1, 2, 0), dim=2).tolist()  # k * k * 7
-                    edge_pred, edge_score = get_edge_prediction(prob)
-                    predictions[i]['edges'] = edge_pred
-                    if self.compute_confidence:
-                        predictions[i]['edge_scores'] = edge_score
-                        predictions[i]['edge_score_product'] = np.sqrt(np.prod(edge_score)).item()
-                        predictions[i]['overall_score'] = predictions[i][atom_format]['average_token_score'] * \
-                                                          predictions[i]['edge_score_product']
-                        predictions[i][atom_format].pop('average_token_score')
-                        predictions[i].pop('edge_score_product')
-                    predictions[i]['edge_scores'] = edge_score
+
+        format_ = "chartok_coords"
+        max_len = FORMAT_INFO[format_]['max_len']
+        results[format_] = self.decoder[format_].decode(
+            encoder_out=encoder_out,
+            beam_size=beam_size,
+            n_best=n_best,
+            max_length=max_len
+        )
+        outputs, scores, token_scores, hidden = results[format_]
+        beam_preds = [
+            [self.tokenizer[format_].sequence_to_smiles_and_bracket(x.tolist())
+             for x in pred] for pred in outputs
+        ]
+        predictions = [{format_: pred[0]} for pred in beam_preds]
+        """
+        # unused
+        if self.compute_confidence:
+            for i in range(len(predictions)):
+                # -1: y score, -2: x score, -3: symbol score
+                indices = np.array(predictions[i][format_]['indices']) - 3
+                if format_ == 'chartok_coords':
+                    atom_scores = []
+                    for symbol, index in zip(predictions[i][format_]['symbols'], indices):
+                        atom_score = (np.prod(token_scores[i][0][index - len(symbol) + 1:index + 1])
+                                      ** (1 / len(symbol))).item()
+                        atom_scores.append(atom_score)
+                else:
+                    atom_scores = np.array(token_scores[i][0])[indices].tolist()
+                predictions[i][format_]['atom_scores'] = atom_scores
+                predictions[i][format_]['average_token_score'] = scores[i][0]
+        """
+
+        atom_format = "chartok_coords"
+        dec_out = hidden                        # batch x n_best x len x dim
+        for i in range(len(dec_out)):
+            hidden = dec_out[i][0].unsqueeze(0)     # 1 * len * dim
+            indices = torch.LongTensor(predictions[i][atom_format]['indices']).unsqueeze(0)  # 1 * k
+            pred = self.decoder['edges'](hidden, indices)  # k * k
+            prob = F.softmax(pred['edges'].squeeze(0).permute(1, 2, 0), dim=2).tolist()  # k * k * 7
+            edge_pred, edge_score = get_edge_prediction(prob)
+            predictions[i]['edges'] = edge_pred
+
+            """
+            # unused
+            if self.compute_confidence:
+                predictions[i]['edge_scores'] = edge_score
+                predictions[i]['edge_score_product'] = np.sqrt(np.prod(edge_score)).item()
+                predictions[i]['overall_score'] = predictions[i][atom_format]['average_token_score'] * \
+                                                  predictions[i]['edge_score_product']
+                predictions[i][atom_format].pop('average_token_score')
+                predictions[i].pop('edge_score_product')
+            """
+            predictions[i]['edge_scores'] = edge_score
 
         return predictions
