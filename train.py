@@ -148,17 +148,25 @@ def safe_load_with_shape_change(module, module_states) -> None:
 
     pretrained_param = pretrained_state_dict["decoder.chartok_coords.output_layer.weight"]
     pretrained_dim = pretrained_param.size(0)
+    # output_w[:, :] = 0
     output_w[:pretrained_dim] = pretrained_param
 
     pretrained_param = pretrained_state_dict["decoder.chartok_coords.output_layer.bias"]
     pretrained_dim = pretrained_param.size(0)
+    # output_b[:] = 0
     output_b[:pretrained_dim] = pretrained_param
     # print(f"Pretrained output_b: {pretrained_param}, shape: {pretrained_param.size()}")
     # print(f"New output_b: {output_b}, shape: {output_b.size()}")
 
     pretrained_param = pretrained_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"]
     pretrained_dim = pretrained_param.size(0)
+    # emb_luts[:, :] = 0
     emb_luts[:pretrained_dim] = pretrained_param
+
+    new_state_dict = pretrained_state_dict
+    new_state_dict["decoder.chartok_coords.output_layer.weight"] = output_w
+    new_state_dict["decoder.chartok_coords.output_layer.bias"] = output_b
+    new_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"] = emb_luts
 
     """
     # Extension for edge decoder (GraphPredictor)
@@ -189,6 +197,7 @@ def get_model(args, tokenizer, device, load_path=None):
     if load_path:
         states = load_states(args, load_path)
         safe_load(encoder, states["encoder"])
+        # safe_load(decoder, states["decoder"])
         safe_load_with_shape_change(decoder, states["decoder"])
 
         log_rank_0(f"Model loaded from {load_path}")
@@ -283,6 +292,11 @@ def train_fn(
             results = decoder(encoder_out=features, refs=refs)
             losses, metrics = criterion(results, refs)
 
+            # logits, target, _ = results["chartok_coords"]
+            # print(torch.argmax(logits, dim=-1))
+            # print(target)
+            # exit(0)
+
             loss = sum(losses.values())
             seq_acc = metrics["seq_acc"]
             seq_acc_token_only = metrics["seq_acc_token_only"]
@@ -354,10 +368,22 @@ def train_fn(
     return loss_meter.epoch.avg, global_step
 
 
-def val_fn(valiloader, encoder, decoder, criterion, tokenizer, device, args):
+def val_fn(
+    args,
+    val_loader,
+    encoder,
+    decoder,
+    criterion,
+    tokenizer,
+    device
+):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = LossMeter()
+    seq_acc_meter = LossMeter()
+    seq_acc_token_only_meter = LossMeter()
+    edge_tp_meter = LossMeter()
+
     # switch to evaluation mode
     if hasattr(decoder, 'module'):
         encoder = encoder.module
@@ -366,8 +392,7 @@ def val_fn(valiloader, encoder, decoder, criterion, tokenizer, device, args):
     decoder.eval()
     predictions = {}
     start = end = time.time()
-    # Inference is distributed. The batch is divided and run independently on multiple GPUs, and the predictions
-    # are gathered afterward.
+    # Inference is no longer distributed.
     for step, (indices, images, refs) in enumerate(val_loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -376,16 +401,55 @@ def val_fn(valiloader, encoder, decoder, criterion, tokenizer, device, args):
         with torch.cuda.amp.autocast(enabled=args.fp16):
             with torch.no_grad():
                 features, hiddens = encoder(images)
-                results = decoder(features, hiddens, refs)
-                losses = criterion(results, refs)
-                loss = sum(losses.values())
+                results = decoder(encoder_out=features, refs=refs)
+                losses, metrics = criterion(results, refs)
 
-                batch_preds  = decoder.decode(features, hiddens, refs)
+                # logits, target, _ = results["chartok_coords"]
+                # print(torch.argmax(logits, dim=-1))
+                # print(target)
+                # exit(0)
+
+                loss = sum(losses.values())
+                seq_acc = metrics["seq_acc"]
+                seq_acc_token_only = metrics["seq_acc_token_only"]
+                edge_tp = metrics["edge_tp"]
+
+                batch_preds = decoder.decode(encoder_out=features)
+
+        for i, ind in enumerate(indices):
+            if ind > 5:
+                continue
+            log_rank_0(f"Prediction for {ind}: ")
+            log_rank_0(f"ref: {refs['chartok_coords'][0][i]}")
+            for k, v in batch_preds[i].items():
+                if k in ["edges", "edge_scores"]:
+                    continue
+                log_rank_0(f"{k}: {v}")
 
         # record loss
-        loss_meter.update(loss, losses, batch_size)
-        if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
+        loss_meter.update(
+            loss,
+            losses,
+            batch_size
+        )
+        seq_acc_meter.update(
+            seq_acc,
+            {k: v for k, v in metrics.items() if k == "seq_acc"},
+            batch_size
+        )
+        seq_acc_token_only_meter.update(
+            seq_acc_token_only,
+            {k: v for k, v in metrics.items() if k == "seq_acc_token_only"},
+            batch_size
+        )
+        edge_tp_meter.update(
+            edge_tp,
+            {k: v for k, v in metrics.items() if k == "edge_tp"},
+            batch_size
+        )
+
+        # if args.gradient_accumulation_steps > 1:
+        #     loss = loss / args.gradient_accumulation_steps
 
         for idx, preds in zip(indices, batch_preds):
             predictions[idx] = preds
@@ -394,15 +458,15 @@ def val_fn(valiloader, encoder, decoder, criterion, tokenizer, device, args):
         end = time.time()
         if step % args.print_freq == 0 or step == (len(val_loader) - 1):
             loss_str = ' '.join([f'{k}:{v.avg:.4f}' for k, v in loss_meter.subs.items()])
-            print_rank_0('EVAL: [{0}/{1}] '
-                         'Data {data_time.avg:.3f}s ({sum_data_time}) '
-                         'Elapsed {remain:s} '
-                         'Loss: {loss.avg:.4f} ({loss_str}) '
-            .format(
-                step, len(valid_loader), batch_time=batch_time,
-                data_time=data_time, loss=loss_meter, loss_str=loss_str,
-                sum_data_time=asMinutes(data_time.sum),
-                remain=timeSince(start, float(step + 1) / len(valid_loader))))
+            log_rank_0(
+                f"EVAL: [{step}/{len(val_loader)}] "
+                f"Data {data_time.avg:.3f}s ({asMinutes(data_time.sum)}) "
+                f"Elapsed {timeSince(start, float(step + 1) / len(val_loader)):s} "
+                f"Loss: {loss_meter.avg:.4f} ({loss_str}) "
+                f"Seq. acc.: {seq_acc_meter.avg:.4f} "
+                f"Seq. acc. token only: {seq_acc_token_only_meter.avg:.4f} "
+                f"Edge true pos: {edge_tp_meter.avg:.4f} "
+            )
     # # gather predictions from different GPUs
     # gathered_preds = [None for i in range(dist.get_world_size())]
     # dist.all_gather_object(gathered_preds, predictions)
@@ -489,7 +553,7 @@ def train_loop(
 
         # train
         avg_loss, global_step = train_fn(
-            args,
+            args=args,
             train_loader=train_loader,
             encoder=encoder,
             decoder=decoder,
@@ -505,10 +569,10 @@ def train_loop(
         )
 
         # eval
-        TODO
-        # FIXME
+        # if not epoch == 6:
+        #     continue
         scores = inference(
-            args,
+            args=args,
             data_df=val_df,
             criterion=criterion,
             tokenizer=tokenizer,
@@ -526,6 +590,7 @@ def train_loop(
         log_rank_0(f"Epoch {epoch + 1} - Time: {elapsed:.0f}s")
         log_rank_0(f"Epoch {epoch + 1} - Score: {json.dumps(scores)}")
 
+        """
         save_obj = {
             'encoder': encoder.state_dict(),
             'encoder_optimizer': encoder_optimizer.state_dict(),
@@ -560,20 +625,26 @@ def train_loop(
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
             with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
                 json.dump(scores, f)
+        
+        
 
         if args.save_mode == "all":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_ep{epoch}.pth'))
         if args.save_mode == "last":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth'))
+        
+        """
 
     if args.local_rank != -1:
         dist.barrier()
 
 
 def inference(
-    args, data_df, criterion, tokenizer, encoder=None, decoder=None, save_path=None, split='test'):
-    print_rank_0("========== inference ==========")
-    print_rank_0(data_df.attrs['file'])
+    args, data_df, criterion, tokenizer,
+    encoder=None, decoder=None, save_path=None, split: str = "test"
+):
+    log_rank_0("========== inference ==========")
+    log_rank_0(data_df.attrs['file'])
 
     if args.local_rank == 0 and os.path.isdir(save_path):
         os.makedirs(save_path, exist_ok=True)
@@ -585,32 +656,40 @@ def inference(
         sampler = DistributedSampler(dataset, shuffle=False)
     else:
         sampler = SequentialSampler(dataset)
-    dataloader = DataLoader(dataset,
-                            batch_size=args.batch_size * 2,
-                            sampler=sampler,
-                            num_workers=args.num_workers,
-                            prefetch_factor=4,
-                            persistent_workers=True,
-                            pin_memory=True,
-                            drop_last=False,
-                            collate_fn=bms_collate)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size * 2,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        prefetch_factor=4,
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=polymer_collate
+    )
     if encoder is None or decoder is None:
         # valid/test mode
         if args.load_path is None:
             args.load_path = save_path
         encoder, decoder = get_model(args, tokenizer, device, args.load_path)
-    predictions = valid_fn(dataloader, encoder, decoder, criterion, tokenizer, device, args)
 
-    # FIXME: pass string-level evaluation for now
-    return {}
+    predictions = val_fn(
+        args=args,
+        val_loader=dataloader,
+        encoder=encoder,
+        decoder=decoder,
+        criterion=criterion,
+        tokenizer=tokenizer,
+        device=device
+    )
+
+    return
     # The evaluation and saving prediction is only performed in the master process.
     if args.local_rank > 0:
         return
-    print('Start evaluation')
+    log_rank_0("Start evaluation")
 
     # Deal with discrepancies between datasets
-    if 'pubchem_cid' in data_df.columns:
-        data_df['image_id'] = data_df['pubchem_cid']
     if 'image_id' not in data_df.columns:
         data_df['image_id'] = [path.split('/')[-1].split('.')[0] for path in data_df['file_path']]
     pred_df = data_df[['image_id']].copy()
