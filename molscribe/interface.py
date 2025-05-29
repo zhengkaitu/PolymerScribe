@@ -9,7 +9,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from .dataset import get_transforms
 from .model import Encoder, Decoder
-from .chemistry import convert_graph_to_smiles
+from .chemistry import convert_graph_to_smiles_and_molblock
 from .tokenizer import get_tokenizer
 
 
@@ -63,6 +63,7 @@ class MolScribe:
         group.add_argument("--max_relative_positions", help="Max relative positions", type=int, default=0)
         parser.add_argument('--continuous_coords', action='store_true')
         parser.add_argument('--compute_confidence', action='store_true')
+        parser.add_argument("--num_bond_type", help="Number of bond types including no bond", type=int, default=7)
         # Data
         parser.add_argument('--input_size', type=int, default=384)
         parser.add_argument('--vocab_file', type=str, default=None)
@@ -101,16 +102,26 @@ class MolScribe:
             images = torch.stack(images, dim=0).to(device)
             with torch.no_grad():
                 features, hiddens = self.encoder(images)
-                batch_predictions = self.decoder.decode(features, hiddens)
+                batch_predictions = self.decoder.decode(encoder_out=features)
             predictions += batch_predictions
 
         smiles = [pred['chartok_coords']['smiles'] for pred in predictions]
-        node_coords = [pred['chartok_coords']['coords'] for pred in predictions]
         node_symbols = [pred['chartok_coords']['symbols'] for pred in predictions]
+        node_coords = [pred['chartok_coords']['coords'] for pred in predictions]
+        bracket_symbols = [preds["chartok_coords"]["bracket_symbols"] for preds in predictions]
+        bracket_coords = [preds["chartok_coords"]["bracket_coords"] for preds in predictions]
+
         edges = [pred['edges'] for pred in predictions]
 
-        smiles_list, molblock_list, r_success = convert_graph_to_smiles(
-            node_coords, node_symbols, edges, images=input_images, num_workers=self.num_workers)
+        smiles_list, molblock_list, r_success = convert_graph_to_smiles_and_molblock(
+            node_symbols=node_symbols,
+            node_coords=node_coords,
+            edges=edges,
+            bracket_symbols=bracket_symbols,
+            bracket_coords=bracket_coords,
+            images=input_images,
+            num_workers=self.num_workers
+        )
 
         outputs = []
         for smiles, molblock, pred in zip(smiles_list, molblock_list, predictions):

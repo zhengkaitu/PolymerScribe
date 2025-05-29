@@ -1,13 +1,15 @@
 import argparse
+import cv2
 import datetime
 import json
+import numpy as np
 import os
 import pandas as pd
 import time
 import torch
 import torch.distributed as dist
 from evaluate import SmilesEvaluator
-from molscribe.chemistry import convert_graph_to_smiles, postprocess_smiles, keep_main_molecule
+from molscribe.chemistry import convert_graph_to_smiles_and_molblock, postprocess_smiles, keep_main_molecule
 from molscribe.dataset import TrainDataset, polymer_collate
 from molscribe.model import Encoder, Decoder
 from molscribe.loss import Criterion
@@ -19,7 +21,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import get_scheduler
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def get_args():
@@ -376,7 +378,7 @@ def val_fn(
     criterion,
     tokenizer,
     device
-):
+) -> Tuple[List[Dict[str, Any]], float]:
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = LossMeter()
@@ -390,7 +392,10 @@ def val_fn(
         decoder = decoder.module
     encoder.eval()
     decoder.eval()
-    predictions = {}
+    # predictions = {}
+    n = len(val_loader.dataset)
+    predictions = [{}] * n
+
     start = end = time.time()
     # Inference is no longer distributed.
     for step, (indices, images, refs) in enumerate(val_loader):
@@ -476,7 +481,7 @@ def val_fn(
     #     for idx, pred in preds.items():
     #         predictions[idx] = pred
 
-    return predictions
+    return predictions, seq_acc_meter.avg
 
 
 def train_loop(
@@ -539,6 +544,7 @@ def train_loop(
     # loop
     # ====================================================
     criterion = Criterion(args, tokenizer).to(device)
+    best_score = -np.inf
 
     global_step = encoder_scheduler.last_epoch
     start_epoch = global_step // args.train_steps_per_epoch
@@ -590,7 +596,6 @@ def train_loop(
         log_rank_0(f"Epoch {epoch + 1} - Time: {elapsed:.0f}s")
         log_rank_0(f"Epoch {epoch + 1} - Score: {json.dumps(scores)}")
 
-        """
         save_obj = {
             'encoder': encoder.state_dict(),
             'encoder_optimizer': encoder_optimizer.state_dict(),
@@ -605,10 +610,12 @@ def train_loop(
             }
         }
 
-        for name in ['post_smiles', 'graph_smiles', 'canon_smiles']:
-            if name in scores:
-                score = scores[name]
-                break
+        score = scores["seq_acc"]
+
+        # for name in ['post_smiles', 'graph_smiles', 'canon_smiles']:
+        #     if name in scores:
+        #         score = scores[name]
+        #         break
 
         if SUMMARY:
             SUMMARY.add_scalar('train/loss', avg_loss, global_step)
@@ -623,17 +630,13 @@ def train_loop(
             best_score = score
             log_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
-            with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
+            with open(os.path.join(save_path, 'best_val.json'), 'w') as f:
                 json.dump(scores, f)
-        
-        
 
         if args.save_mode == "all":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_ep{epoch}.pth'))
         if args.save_mode == "last":
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth'))
-        
-        """
 
     if args.local_rank != -1:
         dist.barrier()
@@ -642,7 +645,7 @@ def train_loop(
 def inference(
     args, data_df, criterion, tokenizer,
     encoder=None, decoder=None, save_path=None, split: str = "test"
-):
+) -> Optional[Dict[str, Any]]:
     log_rank_0("========== inference ==========")
     log_rank_0(data_df.attrs['file'])
 
@@ -668,12 +671,16 @@ def inference(
         collate_fn=polymer_collate
     )
     if encoder is None or decoder is None:
-        # valid/test mode
-        if args.load_path is None:
+        # val/test mode
+        # if args.load_path is None:
+        if args.do_train and save_path:
             args.load_path = save_path
         encoder, decoder = get_model(args, tokenizer, device, args.load_path)
 
-    predictions = val_fn(
+    if criterion is None:
+        criterion = Criterion(args, tokenizer).to(device)
+
+    predictions, seq_acc = val_fn(
         args=args,
         val_loader=dataloader,
         encoder=encoder,
@@ -683,61 +690,69 @@ def inference(
         device=device
     )
 
-    return
+    scores = {
+        "seq_acc": seq_acc
+    }
+
     # The evaluation and saving prediction is only performed in the master process.
     if args.local_rank > 0:
-        return
+        return None
     log_rank_0("Start evaluation")
 
     # Deal with discrepancies between datasets
     if 'image_id' not in data_df.columns:
         data_df['image_id'] = [path.split('/')[-1].split('.')[0] for path in data_df['file_path']]
     pred_df = data_df[['image_id']].copy()
-    scores = {}
 
-    for format_ in args.formats:
-        if format_ in ['atomtok', 'atomtok_coords', 'chartok_coords']:
-            format_preds = [preds[format_] for preds in predictions]
-            # SMILES
-            pred_df['SMILES'] = [preds['smiles'] for preds in format_preds]
-            if format_ in ['atomtok_coords', 'chartok_coords']:
-                pred_df['node_coords'] = [preds['coords'] for preds in format_preds]
-                pred_df['node_symbols'] = [preds['symbols'] for preds in format_preds]
-            if args.compute_confidence:
-                pred_df['SMILES_scores'] = [preds['scores'] for preds in format_preds]
-                pred_df['indices'] = [preds['indices'] for preds in format_preds]
+    format_ = "chartok_coords"
+    format_preds = [preds[format_] for preds in predictions]
+    # SMILES
+    pred_df['SMILES'] = [preds['smiles'] for preds in format_preds]
+    pred_df['node_symbols'] = [preds['symbols'] for preds in format_preds]
+    pred_df['node_coords'] = [preds['coords'] for preds in format_preds]
+    if args.compute_confidence:
+        pred_df['SMILES_scores'] = [preds['scores'] for preds in format_preds]
+        pred_df['indices'] = [preds['indices'] for preds in format_preds]
+
+    # bracket
+    pred_df["bracket_symbols"] = [preds["bracket_symbols"] for preds in format_preds]
+    pred_df["bracket_coords"] = [preds["bracket_coords"] for preds in format_preds]
 
     # Construct graph from predicted atoms and bonds (including verify chirality)
-    if 'edges' in args.formats:
-        pred_df['edges'] = [preds['edges'] for preds in predictions]
-        if args.compute_confidence:
-            pred_df['edges_scores'] = [preds['edges_scores'] for preds in predictions]
-        smiles_list, molblock_list, r_success = convert_graph_to_smiles(
-            pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
+    pred_df['edges'] = [preds['edges'] for preds in predictions]
+    if args.compute_confidence:
+        pred_df['edges_scores'] = [preds['edges_scores'] for preds in predictions]
+    # smiles_list, molblock_list, r_success = convert_graph_to_smiles(
+    #     pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
+    smiles_list, molblock_list, r_success = convert_graph_to_smiles_and_molblock(
+        node_symbols=pred_df["node_symbols"],
+        node_coords=pred_df["node_coords"],
+        edges=pred_df["edges"],
+        bracket_symbols=pred_df["bracket_symbols"],
+        bracket_coords=pred_df["bracket_coords"],
+        images=[cv2.imread(path) for path in data_df['file_path']]
+    )
 
-        print(f'Graph to SMILES success ratio: {r_success:.4f}')
-        pred_df['graph_SMILES'] = smiles_list
-        if args.molblock:
-            pred_df['molblock'] = molblock_list
+    log_rank_0(f'Graph to SMILES success ratio: {r_success:.4f}')
+    pred_df['graph_SMILES'] = smiles_list
+    if args.molblock:
+        pred_df['molblock'] = molblock_list
+    #
+    # # Postprocess the predicted SMILES (verify chirality, expand functional groups)
+    # smiles_list, _, r_success = postprocess_smiles(
+    #     pred_df['SMILES'], pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
+    # log_rank_0(f'Postprocess SMILES success ratio: {r_success:.4f}')
+    # pred_df['post_SMILES'] = smiles_list
 
-    # Postprocess the predicted SMILES (verify chirality, expand functional groups)
-    if 'SMILES' in pred_df.columns:
-        if 'edges' in pred_df.columns:
-            smiles_list, _, r_success = postprocess_smiles(
-                pred_df['SMILES'], pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
-        else:
-            smiles_list, _, r_success = postprocess_smiles(pred_df['SMILES'])
-        print(f'Postprocess SMILES success ratio: {r_success:.4f}')
-        pred_df['post_SMILES'] = smiles_list
-
-    # Keep the main molecule
-    if args.keep_main_molecule:
-        if 'graph_SMILES' in pred_df:
-            pred_df['graph_SMILES'] = keep_main_molecule(pred_df['graph_SMILES'])
-        if 'post_SMILES' in pred_df:
-            pred_df['post_SMILES'] = keep_main_molecule(pred_df['post_SMILES'])
+    # # Keep the main molecule
+    # if args.keep_main_molecule:
+    #     if 'graph_SMILES' in pred_df:
+    #         pred_df['graph_SMILES'] = keep_main_molecule(pred_df['graph_SMILES'])
+    #     if 'post_SMILES' in pred_df:
+    #         pred_df['post_SMILES'] = keep_main_molecule(pred_df['post_SMILES'])
 
     # Compute scores
+    """
     if 'SMILES' in data_df.columns:
         evaluator = SmilesEvaluator(data_df['SMILES'], tanimoto=True)
         print('label:', data_df['SMILES'].values[:2])
@@ -756,8 +771,9 @@ def inference(
             scores['graph_graph'] = graph_scores['graph']
             scores['graph_chiral'] = graph_scores['chiral']
             scores['graph_tanimoto'] = graph_scores['tanimoto']
+    """
 
-    print('Save predictions...')
+    log_rank_0('Save predictions...')
     file = data_df.attrs['file'].split('/')[-1]
     pred_df = format_df(pred_df)
     pred_df.to_csv(os.path.join(save_path, f'prediction_{file}'), index=False)
@@ -784,7 +800,7 @@ def get_data(args) -> Tuple[
         ])
         log_rank_0(f'train.shape: {train_df.shape}')
     if args.do_train or args.do_val:
-        val_df = pd.read_csv(os.path.join(args.data_path, args.val_file))
+        val_df = pd.read_csv(os.path.join(args.data_path, args.val_file))[:5]
         val_df.attrs['file'] = args.val_file
         log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:

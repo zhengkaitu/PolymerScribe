@@ -1,5 +1,6 @@
 import cairosvg
 import csv
+import numpy as np
 import pandas as pd
 import json
 from rdkit import Chem
@@ -92,6 +93,7 @@ def aggregate_into_csv() -> None:
 
     for file_i in range(1, 301):
         # if not file_i == 5:
+        # if file_i > 5:
         #     continue
 
         file_path = f"data/si_mol/{file_i}.png"
@@ -101,6 +103,10 @@ def aggregate_into_csv() -> None:
         Chem.Kekulize(mol)
 
         raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=False)
+        reordered_atom_i = eval(mol.GetProp("_smilesAtomOutputOrder"))
+        inverse_map = np.argsort(reordered_atom_i).tolist()
+        # print(reordered_atom_i)
+        # print(inverse_map)
 
         # for now SMILES is the same as raw_SMILES which suffices for the SI images
         # TODO: extension for R groups may be added later; we'll see
@@ -108,9 +114,14 @@ def aggregate_into_csv() -> None:
         conf = mol.GetConformer()
 
         node_coords = []
+        """
         for atom_i, atom in enumerate(mol.GetAtoms()):
             coord = conf.GetAtomPosition(atom_i)
             # print(atom.GetSymbol(), coord.x, coord.y, coord.z)
+            node_coords.append([coord.x, coord.y])
+        """
+        for atom_i in reordered_atom_i:
+            coord = conf.GetAtomPosition(atom_i)
             node_coords.append([coord.x, coord.y])
 
         edges = {}
@@ -126,16 +137,26 @@ def aggregate_into_csv() -> None:
                 break
             bond_type = int(bond_type)
 
-            begin_atom_i = bond.GetBeginAtomIdx()
-            end_atom_i = bond.GetEndAtomIdx()
+            # begin_atom_i = bond.GetBeginAtomIdx()
+            # end_atom_i = bond.GetEndAtomIdx()
+
+            begin_atom_i_in_mol = bond.GetBeginAtomIdx()
+            end_atom_i_in_mol = bond.GetEndAtomIdx()
+            begin_atom_i = inverse_map[bond.GetBeginAtomIdx()]
+            end_atom_i = inverse_map[bond.GetEndAtomIdx()]
+            # print(f"begin i: {bond.GetBeginAtomIdx()} -> {begin_atom_i}, "
+            #       f"symbol: {mol.GetAtomWithIdx(begin_atom_i_in_mol).GetSymbol()} "
+            #       f"end i: {bond.GetEndAtomIdx()} -> {end_atom_i}, "
+            #       f"symbol: {mol.GetAtomWithIdx(end_atom_i_in_mol).GetSymbol()}")
+
             edge = {
                 "begin_atom_i": begin_atom_i,
                 "end_atom_i": end_atom_i,
                 "bond_type": bond_type,
-                "begin_coord_x": conf.GetAtomPosition(begin_atom_i).x,
-                "begin_coord_y": conf.GetAtomPosition(begin_atom_i).y,
-                "end_coord_x": conf.GetAtomPosition(end_atom_i).x,
-                "end_coord_y": conf.GetAtomPosition(end_atom_i).y
+                "begin_coord_x": conf.GetAtomPosition(begin_atom_i_in_mol).x,
+                "begin_coord_y": conf.GetAtomPosition(begin_atom_i_in_mol).y,
+                "end_coord_x": conf.GetAtomPosition(end_atom_i_in_mol).x,
+                "end_coord_y": conf.GetAtomPosition(end_atom_i_in_mol).y
             }
             edges[bond_i] = edge
 

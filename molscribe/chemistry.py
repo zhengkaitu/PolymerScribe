@@ -1,17 +1,17 @@
 import copy
-import traceback
-import numpy as np
-import multiprocessing
 import itertools
-
+import multiprocessing
+import numpy as np
+import traceback
 import rdkit
 import rdkit.Chem as Chem
+from rdkit.Geometry import Point3D
+from SmilesPE.pretokenizer import atomwise_tokenizer
+from typing import List, Tuple
+from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, VALENCES, FORMULA_REGEX
+from .utils import log_rank_0
 
 rdkit.RDLogger.DisableLog('rdApp.*')
-
-from SmilesPE.pretokenizer import atomwise_tokenizer
-
-from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, VALENCES, FORMULA_REGEX
 
 
 def is_valid_mol(s, format_='atomtok'):
@@ -84,6 +84,15 @@ def normalize_nodes(nodes, flip_y=True):
 def _verify_chirality(mol, coords, symbols, edges, debug=False):
     try:
         n = mol.GetNumAtoms()
+        conf = Chem.Conformer(n)
+        conf.Set3D(False)
+        for i, (x, y) in enumerate(coords):
+            conf.SetAtomPosition(i, (x, 1 - y, 0))
+            # print(f"i: {i}, x: {x}, y: {y}")
+        mol.AddConformer(conf)
+
+        return mol.GetMol()
+
         # Make a temp mol to find chiral centers
         mol_tmp = mol.GetMol()
         Chem.SanitizeMol(mol_tmp)
@@ -113,6 +122,7 @@ def _verify_chirality(mol, coords, symbols, edges, debug=False):
         conf.Set3D(False)
         for i, (x, y) in enumerate(coords):
             conf.SetAtomPosition(i, (x, 1 - y, 0))
+            # print(f"i: {i}, x: {x}, y: {y}")
         mol.AddConformer(conf)
 
         # Magic, inferring chirality from coordinates and BondDir. DO NOT CHANGE.
@@ -120,7 +130,7 @@ def _verify_chirality(mol, coords, symbols, edges, debug=False):
         Chem.AssignChiralTypesFromBondDirs(mol)
         Chem.AssignStereochemistry(mol, force=True)
 
-        # Second loop to reset any wedge/dash bond to be starting from the chiral center)
+        # Second loop to reset any wedge/dash bond to be starting from the chiral center
         for i in chiral_center_ids:
             for j in range(n):
                 if edges[i][j] == 5:
@@ -405,6 +415,55 @@ def convert_smiles_to_mol(smiles):
     return mol
 
 
+def _add_sgroup(
+    mol,
+    bracket_symbols: List[str],
+    bracket_coords: List[Tuple[float, float]]
+):
+    # mol is edited in-place
+    # TODO: step=4 assumes brackets appear in pair; need special treatment for cases like 3-brackets
+    # print(bracket_symbols)
+    for i in range(0, len(bracket_symbols) - 3 , 4):
+        # print(i)
+        assert bracket_symbols[i].startswith("<bra>")
+        assert bracket_symbols[i+1].startswith("<ket>")
+        assert bracket_symbols[i+2].startswith("<bra>")
+        assert bracket_symbols[i+3].startswith("<ket>")
+        assert len(bracket_coords[i]) == 2
+        assert len(bracket_coords[i+1]) == 2
+        assert len(bracket_coords[i+2]) == 2
+        assert len(bracket_coords[i+3]) == 2
+
+        sg = Chem.CreateMolSubstanceGroup(mol, type="SRU")
+        bra_1 = Point3D(bracket_coords[i][0], 1 - bracket_coords[i][1], 0.0)
+        ket_1 = Point3D(bracket_coords[i+1][0], 1 - bracket_coords[i+1][1], 0.0)
+        bracket_1 = [bra_1, ket_1, Point3D(0.0, 0.0, 0.0)]
+        sg.AddBracket(bracket_1)
+
+        bra_2 = Point3D(bracket_coords[i+2][0], 1 - bracket_coords[i+2][1], 0.0)
+        ket_2 = Point3D(bracket_coords[i+3][0], 1 - bracket_coords[i+3][1], 0.0)
+        bracket_2 = [bra_2, ket_2, Point3D(0.0, 0.0, 0.0)]
+        sg.AddBracket(bracket_2)
+
+        # add one atom and bond for the sake of completion
+        sg.AddAtomWithIdx(0)
+        sg.AddBondWithIdx(0)
+
+        # assume superscript is with <bra> and subscript is with <ket>
+        for j in [i, i + 2]:
+            SCN = bracket_symbols[j].lstrip("<bra>")
+            if SCN:
+                sg.SetProp("CONNECT", SCN)
+                break
+        for j in [i + 1, i + 3]:
+            SMT = bracket_symbols[j].lstrip("<ket>")
+            if SMT:
+                sg.SetProp("LABEL", SMT)
+                break
+
+    return mol
+
+
 BOND_TYPES = {1: Chem.rdchem.BondType.SINGLE, 2: Chem.rdchem.BondType.DOUBLE, 3: Chem.rdchem.BondType.TRIPLE}
 
 
@@ -489,7 +548,15 @@ def _expand_functional_group(mol, mappings, debug=False):
     return smiles, mol
 
 
-def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
+def _convert_graph_to_smiles_and_molblock(
+    symbols: List[str],
+    coords: List[Tuple[float, float]],
+    edges: List[List[int]],
+    bracket_symbols: List[str],
+    bracket_coords: List[Tuple[float, float]],
+    image=None,
+    debug: bool = False
+):
     mol = Chem.RWMol()
     n = len(symbols)
     ids = []
@@ -538,45 +605,63 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
                 mol.GetBondBetweenAtoms(ids[i], ids[j]).SetBondDir(Chem.BondDir.BEGINDASH)
 
     pred_smiles = '<invalid>'
-
+    debug = True
+    # [print(e) for e in edges]
     try:
         # TODO: move to an util function
         if image is not None:
             height, width, _ = image.shape
             ratio = width / height
             coords = [[x * ratio * 10, y * 10] for x, y in coords]
+            bracket_coords = [[x * ratio * 10, y * 10] for x, y in bracket_coords]
         mol = _verify_chirality(mol, coords, symbols, edges, debug)
+        mol = _add_sgroup(
+            mol,
+            bracket_symbols=bracket_symbols,
+            bracket_coords=bracket_coords
+        )
+
         # molblock is obtained before expanding func groups, otherwise the expanded group won't have coordinates.
         # TODO: make sure molblock has the abbreviation information
         pred_molblock = Chem.MolToMolBlock(mol)
+        pred_molblock = _postprocess_molblock(pred_molblock)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)
         success = True
     except Exception as e:
         if debug:
-            print(traceback.format_exc())
+            log_rank_0(traceback.format_exc())
         pred_molblock = ''
         success = False
 
-    if debug:
-        return pred_smiles, pred_molblock, mol, success
+    # if debug:
+    #     return pred_smiles, pred_molblock, mol, success
+
     return pred_smiles, pred_molblock, success
 
 
-def convert_graph_to_smiles(coords, symbols, edges, images=None, num_workers=16):
+def convert_graph_to_smiles_and_molblock(
+    node_symbols: List[List[str]],
+    node_coords: List[List[Tuple[float, float]]],
+    edges: List[List[List[int]]],
+    bracket_symbols: List[List[str]],
+    bracket_coords: List[List[Tuple[float, float]]],
+    images=None,
+    num_workers: int = 16
+) -> Tuple[List, List, float]:
     if images is None:
-        args_zip = zip(coords, symbols, edges)
+        args_zip = zip(node_symbols, node_coords, edges, bracket_symbols, bracket_coords)
     else:
-        args_zip = zip(coords, symbols, edges, images)
-
+        args_zip = zip(node_symbols, node_coords, edges, bracket_symbols, bracket_coords, images)
     if num_workers <= 1:
-        results = itertools.starmap(_convert_graph_to_smiles, args_zip)
+        results = itertools.starmap(_convert_graph_to_smiles_and_molblock, args_zip)
         results = list(results)
     else:
         with multiprocessing.Pool(num_workers) as p:
-            results = p.starmap(_convert_graph_to_smiles, args_zip, chunksize=128)
+            results = p.starmap(_convert_graph_to_smiles_and_molblock, args_zip, chunksize=128)
 
     smiles_list, molblock_list, success = zip(*results)
     r_success = np.mean(success)
+
     return smiles_list, molblock_list, r_success
 
 
@@ -608,6 +693,26 @@ def _postprocess_smiles(smiles, coords=None, symbols=None, edges=None, molblock=
     if debug:
         return pred_smiles, pred_molblock, mol, success
     return pred_smiles, pred_molblock, success
+
+
+def _postprocess_molblock(molblock: str) -> str:
+    lines = molblock.split("\n")
+    newlines = []
+    for line in lines:
+        fields = line.strip().split()
+        # reset double bond stereo
+        if len(fields) == 4:
+            if all(field.isdigit() for field in fields) and fields[2] == "2":
+                newline = line[:-1] + "0"
+            else:
+                newline = line
+        else:
+            newline = line
+        newlines.append(newline)
+
+    processed_molblock = "\n".join(newlines)
+
+    return processed_molblock
 
 
 def postprocess_smiles(smiles, coords=None, symbols=None, edges=None, molblock=False, num_workers=16):
