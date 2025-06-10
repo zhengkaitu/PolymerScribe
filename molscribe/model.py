@@ -369,6 +369,7 @@ class Decoder(nn.Module):
             max_length=max_len
         )
         outputs, scores, token_scores, hidden = results[format_]
+        # print(f"outputs: {outputs}")
         beam_preds = [
             [self.tokenizer[format_].sequence_to_smiles_and_bracket(x.tolist())
              for x in pred] for pred in outputs

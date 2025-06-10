@@ -8,8 +8,7 @@ import pandas as pd
 import time
 import torch
 import torch.distributed as dist
-from evaluate import SmilesEvaluator
-from molscribe.chemistry import convert_graph_to_smiles_and_molblock, postprocess_smiles, keep_main_molecule
+from molscribe.chemistry import convert_graph_to_molblock
 from molscribe.dataset import TrainDataset, polymer_collate
 from molscribe.model import Encoder, Decoder
 from molscribe.loss import Criterion
@@ -724,7 +723,7 @@ def inference(
         pred_df['edges_scores'] = [preds['edges_scores'] for preds in predictions]
     # smiles_list, molblock_list, r_success = convert_graph_to_smiles(
     #     pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
-    smiles_list, molblock_list, r_success = convert_graph_to_smiles_and_molblock(
+    smiles_list, molblock_list, r_success = convert_graph_to_molblock(
         node_symbols=pred_df["node_symbols"],
         node_coords=pred_df["node_coords"],
         edges=pred_df["edges"],
@@ -737,41 +736,6 @@ def inference(
     pred_df['graph_SMILES'] = smiles_list
     if args.molblock:
         pred_df['molblock'] = molblock_list
-    #
-    # # Postprocess the predicted SMILES (verify chirality, expand functional groups)
-    # smiles_list, _, r_success = postprocess_smiles(
-    #     pred_df['SMILES'], pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
-    # log_rank_0(f'Postprocess SMILES success ratio: {r_success:.4f}')
-    # pred_df['post_SMILES'] = smiles_list
-
-    # # Keep the main molecule
-    # if args.keep_main_molecule:
-    #     if 'graph_SMILES' in pred_df:
-    #         pred_df['graph_SMILES'] = keep_main_molecule(pred_df['graph_SMILES'])
-    #     if 'post_SMILES' in pred_df:
-    #         pred_df['post_SMILES'] = keep_main_molecule(pred_df['post_SMILES'])
-
-    # Compute scores
-    """
-    if 'SMILES' in data_df.columns:
-        evaluator = SmilesEvaluator(data_df['SMILES'], tanimoto=True)
-        print('label:', data_df['SMILES'].values[:2])
-        if 'SMILES' in pred_df.columns:
-            print('pred:', pred_df['SMILES'].values[:2])
-            scores.update(evaluator.evaluate(pred_df['SMILES']))
-        if 'post_SMILES' in pred_df.columns:
-            post_scores = evaluator.evaluate(pred_df['post_SMILES'])
-            scores['post_smiles'] = post_scores['canon_smiles']
-            scores['post_graph'] = post_scores['graph']
-            scores['post_chiral'] = post_scores['chiral']
-            scores['post_tanimoto'] = post_scores['tanimoto']
-        if 'graph_SMILES' in pred_df.columns:
-            graph_scores = evaluator.evaluate(pred_df['graph_SMILES'])
-            scores['graph_smiles'] = graph_scores['canon_smiles']
-            scores['graph_graph'] = graph_scores['graph']
-            scores['graph_chiral'] = graph_scores['chiral']
-            scores['graph_tanimoto'] = graph_scores['tanimoto']
-    """
 
     log_rank_0('Save predictions...')
     file = data_df.attrs['file'].split('/')[-1]

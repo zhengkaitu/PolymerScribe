@@ -1,19 +1,28 @@
 import argparse
-from typing import List
-
 import cv2
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg
+import numpy as np
+import torch
 
+from .chemistry import convert_graph_to_molblock
 from .dataset import get_transforms
 from .model import Encoder, Decoder
-from .chemistry import convert_graph_to_smiles_and_molblock
 from .tokenizer import get_tokenizer
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from typing import List
 
 
-BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge", "open", "closed"]
+BOND_TYPES = [
+    "",
+    "single",
+    "double",
+    "triple",
+    "aromatic",
+    "solid wedge",
+    "dashed wedge",
+    "open",
+    "closed"
+]
 
 
 def safe_load(module, module_states):
@@ -110,10 +119,11 @@ class MolScribe:
         node_coords = [pred['chartok_coords']['coords'] for pred in predictions]
         bracket_symbols = [preds["chartok_coords"]["bracket_symbols"] for preds in predictions]
         bracket_coords = [preds["chartok_coords"]["bracket_coords"] for preds in predictions]
+        # print(f"predictions: {predictions}")
 
         edges = [pred['edges'] for pred in predictions]
 
-        smiles_list, molblock_list, r_success = convert_graph_to_smiles_and_molblock(
+        smiles_list, molblock_list, r_success = convert_graph_to_molblock(
             node_symbols=node_symbols,
             node_coords=node_coords,
             edges=edges,
