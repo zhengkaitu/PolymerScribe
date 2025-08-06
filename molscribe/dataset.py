@@ -199,7 +199,7 @@ class TrainDataset(Dataset):
         for u, v, t in edge_list:
             if u < n and v < n:
                 edges[u, v] = t
-                if t <= 4:
+                if t <= 4 or t >= 7:
                     edges[v, u] = t
                 elif t == 5:
                     edges[v, u] = 6

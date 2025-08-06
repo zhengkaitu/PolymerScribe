@@ -145,7 +145,23 @@ def _add_sgroup(
         assert len(bracket_coords[i+2]) == 2
         assert len(bracket_coords[i+3]) == 2
 
-        sg = Chem.CreateMolSubstanceGroup(mol, type="SRU")
+        # assume superscript is with <bra> and subscript is with <ket>
+        for j in [i, i + 2]:
+            SCN = bracket_symbols[j].lstrip("<bra>")
+            if SCN:
+                break
+        for j in [i + 1, i + 3]:
+            SMT = bracket_symbols[j].lstrip("<ket>")
+            if SMT:
+                break
+
+        if SMT:
+            sg = Chem.CreateMolSubstanceGroup(mol, type="SRU")
+            sg.SetProp("CONNECT", SCN)
+            sg.SetProp("LABEL", SMT)
+        else:
+            sg = Chem.CreateMolSubstanceGroup(mol, type="GEN")
+
         bra_1 = Point3D(bracket_coords[i][0], 1 - bracket_coords[i][1], 0.0)
         ket_1 = Point3D(bracket_coords[i+1][0], 1 - bracket_coords[i+1][1], 0.0)
         bracket_1 = [bra_1, ket_1, Point3D(0.0, 0.0, 0.0)]
@@ -159,18 +175,6 @@ def _add_sgroup(
         # add one atom and bond for the sake of completion
         sg.AddAtomWithIdx(0)
         sg.AddBondWithIdx(0)
-
-        # assume superscript is with <bra> and subscript is with <ket>
-        for j in [i, i + 2]:
-            SCN = bracket_symbols[j].lstrip("<bra>")
-            if SCN:
-                sg.SetProp("CONNECT", SCN)
-                break
-        for j in [i + 1, i + 3]:
-            SMT = bracket_symbols[j].lstrip("<ket>")
-            if SMT:
-                sg.SetProp("LABEL", SMT)
-                break
 
     return mol
 
@@ -253,6 +257,12 @@ def _convert_graph_to_molblock(
             elif edges[i][j] == 6:
                 mol.AddBond(id_mappings[i], id_mappings[j], Chem.BondType.SINGLE)
                 mol.GetBondBetweenAtoms(id_mappings[i], id_mappings[j]).SetBondDir(Chem.BondDir.BEGINDASH)
+            elif edges[i][j] == 7:
+                mol.AddBond(id_mappings[i], id_mappings[j], Chem.BondType.DOUBLE)
+                # TODO TODO
+            elif edges[i][j] == 8:
+                mol.AddBond(id_mappings[i], id_mappings[j], Chem.BondType.SINGLE)
+                # TODO TODO
 
     debug = True
     # [print(e) for e in edges]

@@ -306,6 +306,12 @@ def get_edge_prediction(edge_prob):
             edge_prob[i][j][6] = (edge_prob[i][j][6] + edge_prob[j][i][5]) / 2
             edge_prob[j][i][5] = edge_prob[i][j][6]
             edge_prob[j][i][6] = edge_prob[i][j][5]
+
+            edge_prob[i][j][7] = (edge_prob[i][j][7] + edge_prob[j][i][7]) / 2
+            edge_prob[j][i][7] = edge_prob[i][j][7]
+            edge_prob[i][j][8] = (edge_prob[i][j][8] + edge_prob[j][i][7]) / 2
+            edge_prob[j][i][8] = edge_prob[i][j][8]
+
     prediction = np.argmax(edge_prob, axis=2).tolist()
     score = np.max(edge_prob, axis=2).tolist()
 

@@ -72,7 +72,7 @@ class MolScribe:
         group.add_argument("--max_relative_positions", help="Max relative positions", type=int, default=0)
         parser.add_argument('--continuous_coords', action='store_true')
         parser.add_argument('--compute_confidence', action='store_true')
-        parser.add_argument("--num_bond_type", help="Number of bond types including no bond", type=int, default=7)
+        parser.add_argument("--num_bond_type", help="Number of bond types including no bond", type=int, default=9)
         # Data
         parser.add_argument('--input_size', type=int, default=384)
         parser.add_argument('--vocab_file', type=str, default=None)
@@ -122,7 +122,6 @@ class MolScribe:
         # print(f"predictions: {predictions}")
 
         edges = [pred['edges'] for pred in predictions]
-
         smiles_list, molblock_list, r_success = convert_graph_to_molblock(
             node_symbols=node_symbols,
             node_coords=node_coords,

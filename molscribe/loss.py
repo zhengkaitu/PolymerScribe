@@ -98,7 +98,7 @@ class Criterion(nn.Module):
         criterion = {}
         for format_ in args.formats:
             if format_ == 'edges':
-                criterion['edges'] = GraphLoss(num_edge_type=7)
+                criterion['edges'] = GraphLoss(num_edge_type=args.num_bond_type)
             else:
                 if MASK in tokenizer[format_].stoi:
                     ignore_indices = [PAD_ID, MASK_ID]

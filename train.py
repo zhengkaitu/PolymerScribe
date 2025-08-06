@@ -164,27 +164,28 @@ def safe_load_with_shape_change(module, module_states) -> None:
     # emb_luts[:, :] = 0
     emb_luts[:pretrained_dim] = pretrained_param
 
-    new_state_dict = pretrained_state_dict
-    new_state_dict["decoder.chartok_coords.output_layer.weight"] = output_w
-    new_state_dict["decoder.chartok_coords.output_layer.bias"] = output_b
-    new_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"] = emb_luts
-
-    """
     # Extension for edge decoder (GraphPredictor)
 
     mlp_2_w = new_state_dict["decoder.edges.mlp.2.weight"]
     mlp_2_b = new_state_dict["decoder.edges.mlp.2.bias"]
     # print(f"Initial mlp_2_b: {mlp_2_b}")
 
-    mlp_2_w[:7] = pretrained_state_dict["decoder.edges.mlp.2.weight"]
-    mlp_2_b[:7] = pretrained_state_dict["decoder.edges.mlp.2.bias"]
+    pretrained_param = pretrained_state_dict["decoder.edges.mlp.2.weight"]
+    pretrained_dim = pretrained_param.size(0)
+    mlp_2_w[:pretrained_dim] = pretrained_param
+
+    pretrained_param = pretrained_state_dict["decoder.edges.mlp.2.bias"]
+    pretrained_dim = pretrained_param.size(0)
+    mlp_2_b[:pretrained_dim] = pretrained_state_dict["decoder.edges.mlp.2.bias"]
     # print(f"mlp_2_b after loading pretrained: {mlp_2_b}")
 
     new_state_dict = pretrained_state_dict
+    new_state_dict["decoder.chartok_coords.output_layer.weight"] = output_w
+    new_state_dict["decoder.chartok_coords.output_layer.bias"] = output_b
+    new_state_dict["decoder.chartok_coords.embeddings.make_embedding.emb_luts.0.weight"] = emb_luts
+
     new_state_dict["decoder.edges.mlp.2.weight"] = mlp_2_w
     new_state_dict["decoder.edges.mlp.2.bias"] = mlp_2_b
-    # print(f"mlp_2_b to be loaded into the new module: {mlp_2_b}")
-    """
 
     module.load_state_dict(new_state_dict)
 
@@ -759,12 +760,11 @@ def get_data(args) -> Tuple[
     if args.do_train:
         train_files = args.train_files.split(',')
         train_df = pd.concat([
-            pd.read_csv(os.path.join(args.data_path, file))
-            for file in train_files
+            pd.read_csv(file) for file in train_files
         ])
         log_rank_0(f'train.shape: {train_df.shape}')
     if args.do_train or args.do_val:
-        val_df = pd.read_csv(os.path.join(args.data_path, args.val_file))[:5]
+        val_df = pd.read_csv(args.val_file)[:5]
         val_df.attrs['file'] = args.val_file
         log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:

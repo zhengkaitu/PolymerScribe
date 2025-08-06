@@ -3,6 +3,7 @@ import cv2
 import matplotlib.pyplot as plt
 import os
 import torch
+import traceback as tb
 from molscribe import MolScribe
 from rdkit import Chem
 from rdkit.Chem import Draw
@@ -19,7 +20,7 @@ if __name__ == "__main__":
     device = torch.device('cuda')
     model = MolScribe(args.model_path, device)
 
-    images_root_path = "./data/doc_images"
+    images_root_path = "./data/olsen_images_processed"
     sources = [
         "bigsmiles_manuscript",
         "bigsmiles_si",
@@ -28,11 +29,19 @@ if __name__ == "__main__":
         "non-covalent_manuscript",
         "non-covalent_si"
     ]
-    images_root_output_path = "./data/doc_images/predictions"
 
-    images_root_path = "./data/si_mol"
-    sources = ["."]
-    images_root_output_path = "./data/si_mol/predictions"
+    images_root_path = "./data/realistic_images_processed"
+    sources = [
+        # "generic/acspolymersau",
+        "generic/acsmacrolett"
+    ]
+    # images_root_output_path = "./data/doc_images/predictions"
+    # images_root_output_path = "./data/doc_images/predictions_0610"
+
+    # images_root_path = "./data/si_mol"
+    # sources = ["."]
+    # images_root_output_path = "./data/si_mol/predictions"
+    # images_root_output_path = "./data/si_mol/predictions_0610"
 
     # images_root_path = "./data/realistic_images"
     # sources = [
@@ -43,16 +52,24 @@ if __name__ == "__main__":
     #     "polymer_chemistry"
     # ]
     # images_root_output_path = "./data/realistic_images/predictions"
-
-    os.makedirs(images_root_output_path, exist_ok=True)
+    # images_root_output_path = "./data/realistic_images/predictions_0610"
+    #
+    # images_root_path = "./data/realistic_images"
+    # sources = [
+    #     "ladder",
+    #     "thermoset"
+    # ]
+    # images_root_output_path = "./data/realistic_images/predictions_0612"
+    os.makedirs("predictions", exist_ok=True)
+    images_output_path = "predictions/image_comparison_0805"
+    os.makedirs(images_output_path, exist_ok=True)
     for source in sources:
         path = os.path.join(images_root_path, source)
         with os.scandir(path) as it:
             for entry in sorted(it, key=lambda x: x.name):
                 if entry.is_file():
-                    # if entry.name.endswith(".png") or entry.name.endswith(".jpg"):
-                    if not entry.name == "203.png":
-                        continue
+                    # if not entry.name == "ladder_36.png":
+                    #     continue
                     if entry.name.endswith(".png"):
                         image_path = os.path.join(path, entry.name)
                         print(f"Processing {image_path}")
@@ -67,7 +84,9 @@ if __name__ == "__main__":
                     return_confidence=False
                 )
                 molblock = output["molfile"]
-                print(output)
+                with open(f"{images_output_path}/{entry.name[:-4]}.predicted.mol", "w") as of:
+                    of.write(molblock)
+                # print(molblock)
                 # exit(0)
                 plt.figure(figsize=(8, 4))
                 plt.subplot(1, 2, 1)
@@ -75,11 +94,12 @@ if __name__ == "__main__":
 
                 plt.subplot(1, 2, 2)
                 try:
-                    mol = Chem.MolFromMolBlock(molblock)
+                    mol = Chem.MolFromMolBlock(molblock, sanitize=False)
+                    # print(f"mol: {mol}")
                     img = Draw.MolToImage(mol)
                     plt.imshow(img)
-                except:
+                except Exception as e:
                     print(f"Error processing {image_path}")
-                    pass
+                    tb.print_exc()
 
-                plt.savefig(f"{images_root_output_path}/{entry.name}")
+                plt.savefig(f"{images_output_path}/{entry.name[:-4]}.predicted.png")

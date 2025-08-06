@@ -37,18 +37,25 @@ def parse_mol_file(mol_file: str) -> List[Tuple[int, int, int]]:
                     bond_tokens = bond_line.strip().split()
                     start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
                     if bond_type == 1:
+                        if stereo == 0:
+                            continue
+
                         if stereo == 1:
                             etype = 5
-                            stereo_bonds.append((start - 1, end - 1, etype))
-                        if stereo == 6:
+                        elif stereo == 6:
                             etype = 6
-                            stereo_bonds.append((start - 1, end - 1, etype))
+                        elif stereo == 4:
+                            etype = 8
+                        else:
+                            raise ValueError(f"Unsupported stereo type: {stereo}, {mol_file}")
+                        stereo_bonds.append((start - 1, end - 1, etype))
                 break
 
     return stereo_bonds
 
 
 def _get_row(png_fn: str) -> Dict[str, str]:
+    # print(png_fn)
     png_path = png_fn
     mol_path = f"{png_fn[:-4]}.corrected.mol"
 
@@ -156,7 +163,6 @@ def _get_row(png_fn: str) -> Dict[str, str]:
 
     bracket_tokens = []
     bracket_coords = []
-
     for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
         brackets = sg.GetBrackets()
         if len(brackets) > 2:
@@ -165,7 +171,7 @@ def _get_row(png_fn: str) -> Dict[str, str]:
         properties = sg.GetPropsAsDict()
         SCN = properties.get("CONNECT", "")  # superscript, essentially
         SMT = properties.get("LABEL", "")  # subscript, essentially
-
+        # print(brackets)
         # use for loop to cover images with >2 brackets
         for bracket in brackets[:-1]:
             bracket_tokens.append(["<bra>"])
