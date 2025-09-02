@@ -54,6 +54,52 @@ def parse_mol_file(mol_file: str) -> List[Tuple[int, int, int]]:
     return stereo_bonds
 
 
+def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
+    stereo_bonds = parse_mol_file(mol_path)
+    stereo_bonds = {
+        (start, end): bond_type
+        for start, end, bond_type in stereo_bonds
+    }
+
+    edges = []
+    for bond_i, bond in enumerate(mol.GetBonds()):
+        bond_type = bond.GetBondTypeAsDouble()
+        try:
+            assert bond_type.is_integer() or bond_type == 1.5
+        except AssertionError:
+            print(f"{bond_type}, {mol_path}")
+            break
+
+        if bond_type == 1.5:
+            bond_type = 4
+        else:
+            bond_type = int(bond_type)
+
+        if bond_type == 2:
+            if bond.GetStereo() == Chem.BondStereo.STEREOANY:
+                bond_type = 7
+
+        begin_atom_i_in_mol = bond.GetBeginAtomIdx()
+        end_atom_i_in_mol = bond.GetEndAtomIdx()
+        begin_atom_i = inverse_map[bond.GetBeginAtomIdx()]
+        end_atom_i = inverse_map[bond.GetEndAtomIdx()]
+        # print(f"begin i: {bond.GetBeginAtomIdx()} -> {begin_atom_i}, "
+        #       f"symbol: {mol.GetAtomWithIdx(begin_atom_i_in_mol).GetSymbol()} "
+        #       f"end i: {bond.GetEndAtomIdx()} -> {end_atom_i}, "
+        #       f"symbol: {mol.GetAtomWithIdx(end_atom_i_in_mol).GetSymbol()}")
+
+        # Override with type 5 and 6, if in stereo_bonds
+        bond_type = stereo_bonds.get(
+            (begin_atom_i_in_mol, end_atom_i_in_mol),
+            bond_type
+        )
+
+        edge = [begin_atom_i, end_atom_i, bond_type]
+        edges.append(edge)
+
+    return edges
+
+
 def _get_row(png_fn: str) -> Dict[str, str]:
     # print(png_fn)
     png_path = png_fn
@@ -99,67 +145,7 @@ def _get_row(png_fn: str) -> Dict[str, str]:
         coord = conf.GetAtomPosition(atom_i)
         node_coords.append([coord.x, coord.y])
 
-    edges = {}
-    stereo_bonds = parse_mol_file(mol_path)
-    stereo_bonds = {
-        (start, end): bond_type
-        for start, end, bond_type in stereo_bonds
-    }
-
-    for bond_i, bond in enumerate(mol.GetBonds()):
-        bond_type = bond.GetBondTypeAsDouble()
-        try:
-            assert bond_type.is_integer() or bond_type == 1.5
-        except AssertionError:
-            print(f"{bond_type}, {mol_path}")
-            break
-
-        if bond_type == 1.5:
-            bond_type = 4
-        else:
-            bond_type = int(bond_type)
-
-        # if bond_type == 1:
-        #     bond_dir = bond.GetBondDir()
-        #     if bond_dir:
-        #         print([bond_dir])
-        #     if bond.GetBondDir() == Chem.BondDir.BEGINWEDGE:
-        #         bond_type = 5
-        #     elif bond.GetBondDir() == Chem.BondDir.BEGINDASH:
-        #         bond_type = 6
-
-        if bond_type == 2:
-            if bond.GetStereo() == Chem.BondStereo.STEREOANY:
-                bond_type = 7
-
-        # begin_atom_i = bond.GetBeginAtomIdx()
-        # end_atom_i = bond.GetEndAtomIdx()
-
-        begin_atom_i_in_mol = bond.GetBeginAtomIdx()
-        end_atom_i_in_mol = bond.GetEndAtomIdx()
-        begin_atom_i = inverse_map[bond.GetBeginAtomIdx()]
-        end_atom_i = inverse_map[bond.GetEndAtomIdx()]
-        # print(f"begin i: {bond.GetBeginAtomIdx()} -> {begin_atom_i}, "
-        #       f"symbol: {mol.GetAtomWithIdx(begin_atom_i_in_mol).GetSymbol()} "
-        #       f"end i: {bond.GetEndAtomIdx()} -> {end_atom_i}, "
-        #       f"symbol: {mol.GetAtomWithIdx(end_atom_i_in_mol).GetSymbol()}")
-
-        # Override with type 5 and 6, if in stereo_bonds
-        bond_type = stereo_bonds.get(
-            (begin_atom_i_in_mol, end_atom_i_in_mol),
-            bond_type
-        )
-
-        edge = {
-            "begin_atom_i": begin_atom_i,
-            "end_atom_i": end_atom_i,
-            "bond_type": bond_type,
-            "begin_coord_x": conf.GetAtomPosition(begin_atom_i_in_mol).x,
-            "begin_coord_y": conf.GetAtomPosition(begin_atom_i_in_mol).y,
-            "end_coord_x": conf.GetAtomPosition(end_atom_i_in_mol).x,
-            "end_coord_y": conf.GetAtomPosition(end_atom_i_in_mol).y
-        }
-        edges[bond_i] = edge
+    edges = _get_edges(mol=mol, mol_path=mol_path, inverse_map=inverse_map)
 
     bracket_tokens = []
     bracket_coords = []
@@ -185,12 +171,6 @@ def _get_row(png_fn: str) -> Dict[str, str]:
         bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
         bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
 
-    edges = [[
-        edge["begin_atom_i"],
-        edge["end_atom_i"],
-        edge["bond_type"]
-    ] for edge in edges.values()]
-
     row = {
         "file_path": png_path,
         "mol_path": mol_path,
@@ -212,20 +192,13 @@ def aggregate_into_csv(args) -> None:
         "bracket_tokens", "bracket_coords", "edges"
     ]
 
-    for phase in ["train", "val"]:
-        fn = os.path.join(
-            "experiments",
-            args.expt_id,
-            f"{args.expt_id}_{phase}.filelist.txt"
+    for phase in ["train", "val", "test"]:
+        fn = os.path.join("experiments", args.expt_id, f"{args.expt_id}_{phase}.filelist.txt"
         )
         if not os.path.exists(fn):
             continue
 
-        ofn = os.path.join(
-            "experiments",
-            args.expt_id,
-            f"{args.expt_id}_{phase}.processed.csv"
-        )
+        ofn = os.path.join("experiments", args.expt_id, f"{args.expt_id}_{phase}.processed.csv")
 
         rows = []
         with open(fn, "r") as f:
