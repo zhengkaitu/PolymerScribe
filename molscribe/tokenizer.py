@@ -5,6 +5,7 @@ import os
 import random
 from SmilesPE.pretokenizer import atomwise_tokenizer
 from typing import Any, Dict, List, Optional
+from .utils import log_rank_0
 
 PAD = '<pad>'
 SOS = '<sos>'
@@ -229,7 +230,7 @@ class CharTokenizer(NodeTokenizer):
             labels.append(self.x_to_id(x))
             labels.append(self.y_to_id(y))
 
-            if len(tokens) > 0:
+            if len(tokens) > 1:
                 assert tokens[1] == "<scn>" and "<smt>" in tokens, tokens
                 for token in tokens[1:]:
                     labels.append(self.stoi_ext.get(token, self.stoi.get(token, UNK_ID)))
@@ -302,9 +303,9 @@ class CharTokenizer(NodeTokenizer):
         while i < len(sequence):
             label = sequence[i]
             # scan until BRA
-            if self.itos_ext.get(label) not in [BRA]:
-                i += 1
-                continue
+            if self.itos_ext.get(label) in [BRA]:
+                break
+            i += 1
 
         bracket_sequence = sequence[i:]
         sep_indices = [
@@ -315,6 +316,7 @@ class CharTokenizer(NodeTokenizer):
 
         for start_i, end_i in zip(start_indices, sep_indices):
             sg_sequence = bracket_sequence[start_i:end_i]
+            # log_rank_0(f"sg_sequence: {sg_sequence}")
 
             i = 0
             while i < len(sg_sequence):
@@ -322,27 +324,33 @@ class CharTokenizer(NodeTokenizer):
                 token = self.itos_ext.get(label)
                 # scan until the start of a token group
                 if token not in [BRA, KET, SCN, SMT]:
+                    i += 1
                     continue
 
                 if (
                     token in [BRA, KET]
                     and
-                    i + 2 < len(sequence)
+                    i + 2 < len(sg_sequence)
                     and
-                    self.is_x(sequence[i+1]) and self.is_y(sequence[i+2])
+                    self.is_x(sg_sequence[i+1]) and self.is_y(sg_sequence[i+2])
                 ):
-                    x = self.id_to_x(sequence[i+1])
-                    y = self.id_to_y(sequence[i+2])
+                    x = self.id_to_x(sg_sequence[i+1])
+                    y = self.id_to_y(sg_sequence[i+2])
                     bracket_coords.append([x, y])
                     bracket_symbols.append(token)
                     i += 3
 
                 else:
-                    token = "".join(self.itos_combined[label] for label in sg_sequence[i:])
+                    token = "".join(
+                        self.itos_combined.get(label, "")
+                        for label in sg_sequence[i:]
+                    )
                     token = token + "<sep>"
                     bracket_coords.append(None)
                     bracket_symbols.append(token)
                     break
+            # log_rank_0(f"bracket_symbols: {bracket_symbols}")
+            # log_rank_0(f"bracket_coords: {bracket_coords}")
 
         results = {
             'smiles': smiles,

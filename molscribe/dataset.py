@@ -114,7 +114,12 @@ class TrainDataset(Dataset):
             node_coords = np.array(eval(self.coords_df.loc[idx, 'node_coords']))
             bracket_coords = np.array(eval(self.coords_df.loc[idx, 'bracket_coords']))
             if cond: print(f"raw coords: {node_coords}")
-            coords = np.concatenate((node_coords, bracket_coords), axis=0)
+
+            # Size check needed as some images may have no bracket, e.g., thermosets
+            if bracket_coords.size > 0:
+                coords = np.concatenate((node_coords, bracket_coords), axis=0)
+            else:
+                coords = node_coords
 
             if self.pseudo_coords:
                 coords = normalize_nodes(coords)
@@ -125,7 +130,9 @@ class TrainDataset(Dataset):
 
             image, coords = self.image_transform(image, coords, renormalize=self.pseudo_coords)
             node_coords = coords[:len(node_coords)]
-            bracket_coords = coords[len(node_coords):]
+            if bracket_coords.size > 0:
+                bracket_coords = coords[len(node_coords):]
+            # else bracket_coords = [] which is the original value
 
             if cond: exit(0)
         else:
@@ -198,10 +205,12 @@ class TrainDataset(Dataset):
                 if t <= 4 or t >= 7:
                     edges[v, u] = t
                 ## Remove reciprocity for wedge/dash as the direction does matter for molblocks
-                # elif t == 5:
-                #     edges[v, u] = 6
-                # elif t == 6:
-                #     edges[v, u] = 5
+                elif t == 5:
+                    pass
+                    # edges[v, u] = 6
+                elif t == 6:
+                    pass
+                    # edges[v, u] = 5
                 else:
                     raise ValueError(f"Invalid edge: {t}")
         ref['edges'] = edges

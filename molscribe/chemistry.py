@@ -134,13 +134,15 @@ def _add_sgroup(
     # mol is edited in-place
     # print(bracket_symbols)
     sep_indices = [i for i, coord in enumerate(bracket_coords) if coord is None]
-    start_indices = [0] + sep_indices[:-1]
+    start_indices = [0] + [i + 1 for i in sep_indices[:-1]]
 
     for start_i, end_i in zip(start_indices, sep_indices):
         symbols = bracket_symbols[start_i:end_i]
         coords = bracket_coords[start_i:end_i]
 
         sep_token = bracket_symbols[end_i]
+        assert bracket_coords[end_i] is None
+
         token = sep_token.rstrip("<sep>").lstrip("<scn>")
         tokens = token.split("<smt>")
         SCN = tokens[0]
@@ -184,7 +186,10 @@ def _convert_graph_to_molblock(
         height, width, _ = image.shape
         ratio = width / height
         coords = [[x * ratio * 10, y * 10] for x, y in coords]
-        bracket_coords = [[x * ratio * 10, y * 10] for x, y in bracket_coords]
+        bracket_coords = [
+            [c[0] * ratio * 10, c[1] * 10] if c else None
+            for c in bracket_coords
+        ]
 
     mol = Chem.RWMol()
     n = len(symbols)
