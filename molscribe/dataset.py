@@ -127,10 +127,6 @@ class TrainDataset(Dataset):
             node_coords = coords[:len(node_coords)]
             bracket_coords = coords[len(node_coords):]
 
-            """
-            # here we abuse the notation a bit to keep only the node coords
-            coords = coords[:len(node_coords)]
-            """
             if cond: exit(0)
         else:
             image = self.image_transform(image)
@@ -201,10 +197,11 @@ class TrainDataset(Dataset):
                 edges[u, v] = t
                 if t <= 4 or t >= 7:
                     edges[v, u] = t
-                elif t == 5:
-                    edges[v, u] = 6
-                elif t == 6:
-                    edges[v, u] = 5
+                ## Remove reciprocity for wedge/dash as the direction does matter for molblocks
+                # elif t == 5:
+                #     edges[v, u] = 6
+                # elif t == 6:
+                #     edges[v, u] = 5
                 else:
                     raise ValueError(f"Invalid edge: {t}")
         ref['edges'] = edges

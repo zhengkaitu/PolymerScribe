@@ -132,28 +132,19 @@ def _add_sgroup(
     bracket_coords: List[Tuple[float, float]]
 ):
     # mol is edited in-place
-    # TODO: step=4 assumes brackets appear in pair; need special treatment for cases like 3-brackets
     # print(bracket_symbols)
-    for i in range(0, len(bracket_symbols) - 3 , 4):
-        # print(i)
-        assert bracket_symbols[i].startswith("<bra>")
-        assert bracket_symbols[i+1].startswith("<ket>")
-        assert bracket_symbols[i+2].startswith("<bra>")
-        assert bracket_symbols[i+3].startswith("<ket>")
-        assert len(bracket_coords[i]) == 2
-        assert len(bracket_coords[i+1]) == 2
-        assert len(bracket_coords[i+2]) == 2
-        assert len(bracket_coords[i+3]) == 2
+    sep_indices = [i for i, coord in enumerate(bracket_coords) if coord is None]
+    start_indices = [0] + sep_indices[:-1]
 
-        # assume superscript is with <bra> and subscript is with <ket>
-        for j in [i, i + 2]:
-            SCN = bracket_symbols[j].lstrip("<bra>")
-            if SCN:
-                break
-        for j in [i + 1, i + 3]:
-            SMT = bracket_symbols[j].lstrip("<ket>")
-            if SMT:
-                break
+    for start_i, end_i in zip(start_indices, sep_indices):
+        symbols = bracket_symbols[start_i:end_i]
+        coords = bracket_coords[start_i:end_i]
+
+        sep_token = bracket_symbols[end_i]
+        token = sep_token.rstrip("<sep>").lstrip("<scn>")
+        tokens = token.split("<smt>")
+        SCN = tokens[0]
+        SMT = tokens[1] if len(tokens) > 1 else None
 
         if SMT:
             sg = Chem.CreateMolSubstanceGroup(mol, type="SRU")
@@ -162,19 +153,20 @@ def _add_sgroup(
         else:
             sg = Chem.CreateMolSubstanceGroup(mol, type="GEN")
 
-        bra_1 = Point3D(bracket_coords[i][0], 1 - bracket_coords[i][1], 0.0)
-        ket_1 = Point3D(bracket_coords[i+1][0], 1 - bracket_coords[i+1][1], 0.0)
-        bracket_1 = [bra_1, ket_1, Point3D(0.0, 0.0, 0.0)]
-        sg.AddBracket(bracket_1)
+        for j in range(0, len(symbols) - 1, 2):
+            assert symbols[j] == "<bra>"
+            assert symbols[j+1] == "<ket>"
+            assert len(coords[j]) == 2
+            assert len(coords[j+1]) == 2
 
-        bra_2 = Point3D(bracket_coords[i+2][0], 1 - bracket_coords[i+2][1], 0.0)
-        ket_2 = Point3D(bracket_coords[i+3][0], 1 - bracket_coords[i+3][1], 0.0)
-        bracket_2 = [bra_2, ket_2, Point3D(0.0, 0.0, 0.0)]
-        sg.AddBracket(bracket_2)
+            bra = Point3D(coords[j][0], 1 - coords[j][1], 0.0)
+            ket = Point3D(coords[j+1][0], 1 - coords[j+1][1], 0.0)
+            bracket = [bra, ket, Point3D(0.0, 0.0, 0.0)]
+            sg.AddBracket(bracket)
 
-        # add one atom and bond for the sake of completion
-        sg.AddAtomWithIdx(0)
-        sg.AddBondWithIdx(0)
+            # add one atom and bond for the sake of completion
+            sg.AddAtomWithIdx(0)
+            sg.AddBondWithIdx(0)
 
     return mol
 

@@ -1,6 +1,7 @@
-import os
+import copy
 import json
 import numpy as np
+import os
 import random
 from SmilesPE.pretokenizer import atomwise_tokenizer
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,8 @@ UNK_ID = 3
 MASK_ID = 4
 
 SEP = "<sep>"
+SCN = "<scn>"
+SMT = "<smt>"
 BRA = "<bra>"
 KET = "<ket>"
 
@@ -56,8 +59,10 @@ class NodeTokenizer(Tokenizer):
 
         self.stoi_ext = {
             SEP: self.offset + self.maxx + self.maxy,
-            BRA: self.offset + self.maxx + self.maxy + 1,
-            KET: self.offset + self.maxx + self.maxy + 2
+            SCN: self.offset + self.maxx + self.maxy + 1,
+            SMT: self.offset + self.maxx + self.maxy + 2,
+            BRA: self.offset + self.maxx + self.maxy + 3,
+            KET: self.offset + self.maxx + self.maxy + 4
         }
         self.itos_ext = {v: k for k, v in self.stoi_ext.items()}
         self.itos_combined = self.itos | self.itos_ext
@@ -217,13 +222,18 @@ class CharTokenizer(NodeTokenizer):
 
         assert len(bracket_tokens) == len(bracket_coords)
         for tokens, coords in zip(bracket_tokens, bracket_coords):
-            for token in tokens:
-                labels.append(self.stoi_ext.get(token, self.stoi.get(token, UNK_ID)))
+            labels.append(self.stoi_ext[tokens[0]])
             x, y = coords
             assert 0 <= x <= 1
             assert 0 <= y <= 1
             labels.append(self.x_to_id(x))
             labels.append(self.y_to_id(y))
+
+            if len(tokens) > 0:
+                assert tokens[1] == "<scn>" and "<smt>" in tokens, tokens
+                for token in tokens[1:]:
+                    labels.append(self.stoi_ext.get(token, self.stoi.get(token, UNK_ID)))
+                labels.append(self.stoi_ext[SEP])
 
         labels.append(EOS_ID)
 
@@ -291,35 +301,48 @@ class CharTokenizer(NodeTokenizer):
         bracket_coords = []
         while i < len(sequence):
             label = sequence[i]
-            if label in [EOS_ID, PAD_ID]:
-                break
-            # scan until BRA or KET
-            if self.itos_ext.get(label) == SEP:
-                i += 1
-                continue
-            if self.is_x(label) or self.is_y(label):
-                i += 1
-                continue
-            if self.itos_ext.get(label) not in [BRA, KET]:
+            # scan until BRA
+            if self.itos_ext.get(label) not in [BRA]:
                 i += 1
                 continue
 
-            j = i + 1
-            while j < len(sequence):
-                if not self.is_symbol(sequence[j]):
+        bracket_sequence = sequence[i:]
+        sep_indices = [
+            i for i, label in enumerate(bracket_sequence)
+            if self.itos_ext.get(label) == SEP
+        ]
+        start_indices = [0] + sep_indices[:-1]
+
+        for start_i, end_i in zip(start_indices, sep_indices):
+            sg_sequence = bracket_sequence[start_i:end_i]
+
+            i = 0
+            while i < len(sg_sequence):
+                label = sg_sequence[i]
+                token = self.itos_ext.get(label)
+                # scan until the start of a token group
+                if token not in [BRA, KET, SCN, SMT]:
+                    continue
+
+                if (
+                    token in [BRA, KET]
+                    and
+                    i + 2 < len(sequence)
+                    and
+                    self.is_x(sequence[i+1]) and self.is_y(sequence[i+2])
+                ):
+                    x = self.id_to_x(sequence[i+1])
+                    y = self.id_to_y(sequence[i+2])
+                    bracket_coords.append([x, y])
+                    bracket_symbols.append(token)
+                    i += 3
+
+                else:
+                    token = "".join(self.itos_combined[label] for label in sg_sequence[i:])
+                    token = token + "<sep>"
+                    bracket_coords.append(None)
+                    bracket_symbols.append(token)
                     break
-                j += 1
-            token = "".join(
-                self.itos_combined[sequence[k]] for k in range(i, j)
-            )
-            if j + 2 < len(sequence) and self.is_x(sequence[j]) and self.is_y(sequence[j+1]):
-                x = self.id_to_x(sequence[j])
-                y = self.id_to_y(sequence[j+1])
-                bracket_coords.append([x, y])
-                bracket_symbols.append(token)
-                i = j + 2
-            else:
-                i = j
 
         results = {
             'smiles': smiles,

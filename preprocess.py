@@ -1,4 +1,5 @@
 import argparse
+import traceback as tb
 import csv
 import glob
 import json
@@ -101,7 +102,6 @@ def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
 
 
 def _get_row(png_fn: str) -> Dict[str, str]:
-    # print(png_fn)
     png_path = png_fn
     mol_path = f"{png_fn[:-4]}.corrected.mol"
 
@@ -114,7 +114,13 @@ def _get_row(png_fn: str) -> Dict[str, str]:
     # Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
     # Chem.Kekulize(mol)
     # raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=False)
-    raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False)
+    try:
+        raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False)
+    except RuntimeError:
+        print(f"Runtime error for {png_fn}")
+        tb.print_exc()
+        raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False, isomericSmiles=False)
+
     reordered_atom_i = eval(mol.GetProp("_smilesAtomOutputOrder"))
     inverse_map = np.argsort(reordered_atom_i).tolist()
     # print(reordered_atom_i)
@@ -165,10 +171,22 @@ def _get_row(png_fn: str) -> Dict[str, str]:
             bracket_tokens.append(["<ket>"])
             bracket_coords.append([bracket[1].x, bracket[1].y])
 
-        # lastly, assuming CONNECT and LABEL are attached with the last bracket
-        bracket_tokens.append(["<bra>"] + [token for token in SCN])
+        # lastly, attaching CONNECT and LABEL with the last <ket>
+        # just to keep a record and ensure length consistency.
+        # These will be further processed downstream
+
+        # bracket_tokens.append(["<bra>"] + [token for token in SCN])
+        # bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
+        # bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
+        # bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
+
+        bracket_tokens.append(["<bra>"])
         bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
-        bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
+        bracket_tokens.append(
+            ["<ket>"] +
+            ["<scn>"] + [token for token in str(SCN)] +
+            ["<smt>"] + [token for token in str(SMT)]
+        )
         bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
 
     row = {
