@@ -1,158 +1,342 @@
-import json
 import argparse
 import numpy as np
-import multiprocessing
-import pandas as pd
+import os
+from rdkit import Chem
+from scipy.optimize import linear_sum_assignment
+from typing import Any
 
-import rdkit
-from rdkit import Chem, DataStructs
-
-rdkit.RDLogger.DisableLog('rdApp.*')
-from SmilesPE.pretokenizer import atomwise_tokenizer
+sgroup_cost_threshold = 1.0
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gold_file', type=str, required=True)
-    parser.add_argument('--pred_file', type=str, required=True)
-    parser.add_argument('--pred_field', type=str, default='SMILES')
-    parser.add_argument('--num_workers', type=int, default=16)
-    parser.add_argument('--tanimoto', action='store_true')
-    parser.add_argument('--keep_main', action='store_true')
-    args = parser.parse_args()
-    return args
+    parser.add_argument("--test_filelist", type=str, default=None, required=True)
+    parser.add_argument("--pred_root_path", type=str, default=None, required=True)
+
+    return parser.parse_args()
 
 
-def canonicalize_smiles(smiles, ignore_chiral=False, ignore_cistrans=False, replace_rgroup=True):
-    if type(smiles) is not str or smiles == '':
-        return '', False
-    if ignore_cistrans:
-        smiles = smiles.replace('/', '').replace('\\', '')
-    if replace_rgroup:
-        tokens = atomwise_tokenizer(smiles)
-        for j, token in enumerate(tokens):
-            if token[0] == '[' and token[-1] == ']':
-                symbol = token[1:-1]
-                if symbol[0] == 'R' and symbol[1:].isdigit():
-                    tokens[j] = f'[{symbol[1:]}*]'
-                elif Chem.AtomFromSmiles(token) is None:
-                    tokens[j] = '*'
-        smiles = ''.join(tokens)
-    try:
-        canon_smiles = Chem.CanonSmiles(smiles, useChiral=(not ignore_chiral))
-        success = True
-    except:
-        canon_smiles = smiles
-        success = False
-    return canon_smiles, success
+def normalize_nodes(
+    nodes,
+    flip_y=True,
+    bbox=None
+) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    x, y = nodes[:, 0], nodes[:, 1]
+    if bbox is None:
+        minx, maxx = min(x), max(x)
+        miny, maxy = min(y), max(y)
+    else:
+        minx, maxx = bbox[0], bbox[1]
+        miny, maxy = bbox[2], bbox[3]
+
+    x = (x - minx) / max(maxx - minx, 1e-6)
+    if flip_y:
+        y = (maxy - y) / max(maxy - miny, 1e-6)
+    else:
+        y = (y - miny) / max(maxy - miny, 1e-6)
+
+    return np.stack([x, y], axis=1), (minx, maxx, miny, maxy)
 
 
-def convert_smiles_to_canonsmiles(
-        smiles_list, ignore_chiral=False, ignore_cistrans=False, replace_rgroup=True, num_workers=16):
-    with multiprocessing.Pool(num_workers) as p:
-        results = p.starmap(canonicalize_smiles,
-                            [(smiles, ignore_chiral, ignore_cistrans, replace_rgroup) for smiles in smiles_list],
-                            chunksize=128)
-    canon_smiles, success = zip(*results)
-    return list(canon_smiles), np.mean(success)
+def parse_molblock(molblock: str) -> dict[tuple[int, int], Any]:
+    lines = molblock.split('\n')
+    stereo_bonds = {}
+
+    for i, line in enumerate(lines):
+        if line.endswith("V2000"):
+            tokens = line.split()
+            num_atoms = int(tokens[0])
+            num_bonds = int(tokens[1])
+            for bond_line in lines[i + 1 + num_atoms:i + 1 + num_atoms + num_bonds]:
+                bond_tokens = bond_line.strip().split()
+                start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
+                if bond_type == 1:
+                    if stereo == 0:
+                        continue
+
+                    if stereo == 1:
+                        etype = 5
+                    elif stereo == 6:
+                        etype = 6
+                    elif stereo == 4:
+                        etype = 8
+                    else:
+                        raise ValueError(f"Unsupported stereo type: {stereo}")
+                    stereo_bonds[(start - 1, end - 1)] = etype
+            break
+    return stereo_bonds
+
+def _get_norm_coords(mol) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    conf= mol.GetConformer()
+    coords = []
+    for i, a in enumerate(mol.GetAtoms()):
+        coord = conf.GetAtomPosition(i)
+        coords.append([coord.x, coord.y])
+    coords = np.array(coords, dtype=np.float32)
+    coords, bbox = normalize_nodes(coords)
+
+    return coords, bbox
 
 
-def _keep_main_molecule(smiles, debug=False):
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        frags = Chem.GetMolFrags(mol, asMols=True)
-        if len(frags) > 1:
-            num_atoms = [m.GetNumAtoms() for m in frags]
-            main_mol = frags[np.argmax(num_atoms)]
-            smiles = Chem.MolToSmiles(main_mol)
-    except Exception as e:
-        pass
-    return smiles
+def _atom_equal(a_pred, a_gt) -> bool:
+    symbol_pred = a_pred.GetPropsAsDict().get("molFileAlias", a_pred.GetSymbol())
+    symbol_gt = a_gt.GetPropsAsDict().get("molFileAlias", a_gt.GetSymbol())
+
+    if not symbol_pred.lower() == symbol_gt.lower():
+        return False
+    if not a_pred.GetFormalCharge() == a_gt.GetFormalCharge():
+        return False
+    if not a_pred.GetNumRadicalElectrons() == a_gt.GetNumRadicalElectrons():
+        return False
+
+    return True
 
 
-def keep_main_molecule(smiles, num_workers=16):
-    with multiprocessing.Pool(num_workers) as p:
-        results = p.map(_keep_main_molecule, smiles, chunksize=128)
-    return results
+def _get_bond_type(b, stereo_bond_override: int) -> float:
+    if not b:
+        return 0.0
+
+    bond_type = b.GetBondTypeAsDouble()
+    if bond_type == 1.5:
+        bond_type = 4
+
+    if bond_type == 2:
+        if b.GetStereo() == Chem.BondStereo.STEREOANY:
+            bond_type = 7
+
+    assert stereo_bond_override in [0, 5, 6, 8]
+    if stereo_bond_override:
+        bond_type = stereo_bond_override
+
+    return bond_type
+
+def _get_bracket_coords(brackets) -> np.ndarray:
+    bracket_coords = []
+    for bracket in brackets:
+        bracket_coords.append([bracket[0].x, bracket[0].y])
+        bracket_coords.append([bracket[1].x, bracket[1].y])
+    bracket_coords = np.array(bracket_coords, dtype=np.float32)
+
+    return bracket_coords
 
 
-def tanimoto_similarity(smiles1, smiles2):
-    try:
-        mol1 = Chem.MolFromSmiles(smiles1)
-        mol2 = Chem.MolFromSmiles(smiles2)
-        fp1 = Chem.RDKFingerprint(mol1)
-        fp2 = Chem.RDKFingerprint(mol2)
-        tanimoto = DataStructs.FingerprintSimilarity(fp1, fp2)
-        return tanimoto
-    except:
-        return 0
+def _get_bracket_cost(bracket_coords_pred, bracket_coords_gt) -> float:
+    assert len(bracket_coords_pred) == len(bracket_coords_gt)
+    n_bracket = int(len(bracket_coords_pred) / 2)
+
+    bracket_costs = np.ones((n_bracket, n_bracket), dtype=np.float32) * 1e3
+    for i in range(n_bracket):
+        midpoint_pred = (bracket_coords_pred[i*2] + bracket_coords_pred[i*2+1]) / 2
+        for j in range(n_bracket):
+            midpoint_gt = (bracket_coords_gt[j*2] + bracket_coords_gt[j*2+1]) / 2
+            bracket_costs[i, j] = np.linalg.norm(midpoint_gt - midpoint_pred)
+
+    row_ind, col_ind = linear_sum_assignment(bracket_costs)
+    bracket_cost = bracket_costs[row_ind, col_ind].mean()
+
+    return bracket_cost
 
 
-def compute_tanimoto_similarities(gold_smiles, pred_smiles, num_workers=16):
-    with multiprocessing.Pool(num_workers) as p:
-        similarities = p.starmap(tanimoto_similarity, [(gs, ps) for gs, ps in zip(gold_smiles, pred_smiles)])
-    return similarities
+def _sgroup_equal(sgroup_pred, sgroup_gt) -> bool:
+    properties_pred = sgroup_pred.GetPropsAsDict()
+    properties_gt = sgroup_gt.GetPropsAsDict()
+    SCN_pred = properties_pred.get("CONNECT", "HT")
+    SCN_gt = properties_gt.get("CONNECT", "HT")
+    SMT_pred = properties_pred.get("LABEL", "")
+    SMT_gt = properties_gt.get("LABEL", "")
+
+    if not str(SCN_pred).lower() == str(SCN_gt).lower():
+        return False
+    if not str(SMT_pred).lower() == str(SMT_gt).lower():
+        return False
+
+    return True
 
 
-class SmilesEvaluator(object):
-    def __init__(self, gold_smiles, num_workers=16, tanimoto=False):
-        self.gold_smiles = gold_smiles
-        self.num_workers = num_workers
-        self.tanimoto = tanimoto
-        self.gold_smiles_cistrans, _ = convert_smiles_to_canonsmiles(gold_smiles,
-                                                                     ignore_cistrans=True,
-                                                                     num_workers=num_workers)
-        self.gold_smiles_chiral, _ = convert_smiles_to_canonsmiles(gold_smiles,
-                                                                   ignore_chiral=True, ignore_cistrans=True,
-                                                                   num_workers=num_workers)
-        self.gold_smiles_cistrans = self._replace_empty(self.gold_smiles_cistrans)
-        self.gold_smiles_chiral = self._replace_empty(self.gold_smiles_chiral)
+def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
+    # TODO: check how Hs are exactly handled
+    mol_pred = Chem.MolFromMolBlock(molblock_pred, sanitize=False, removeHs=False, strictParsing=True)
+    mol_gt = Chem.MolFromMolBlock(molblock_gt, sanitize=False, removeHs=False, strictParsing=True)
 
-    def _replace_empty(self, smiles_list):
-        """Replace empty SMILES in the gold, otherwise it will be considered correct if both pred and gold is empty."""
-        return [smiles if smiles is not None and type(smiles) is str and smiles != "" else "<empty>"
-                for smiles in smiles_list]
+    stereo_bonds_pred = parse_molblock(molblock_pred)
+    stereo_bonds_gt = parse_molblock(molblock_gt)
 
-    def evaluate(self, pred_smiles, include_details=False):
-        results = {}
-        if self.tanimoto:
-            results['tanimoto'] = np.mean(compute_tanimoto_similarities(self.gold_smiles, pred_smiles))
-        # Ignore double bond cis/trans
-        pred_smiles_cistrans, _ = convert_smiles_to_canonsmiles(pred_smiles,
-                                                                ignore_cistrans=True,
-                                                                num_workers=self.num_workers)
-        results['canon_smiles'] = np.mean(np.array(self.gold_smiles_cistrans) == np.array(pred_smiles_cistrans))
-        if include_details:
-            results['canon_smiles_details'] = (np.array(self.gold_smiles_cistrans) == np.array(pred_smiles_cistrans))
-        # Ignore chirality (Graph exact match)
-        pred_smiles_chiral, _ = convert_smiles_to_canonsmiles(pred_smiles,
-                                                              ignore_chiral=True, ignore_cistrans=True,
-                                                              num_workers=self.num_workers)
-        results['graph'] = np.mean(np.array(self.gold_smiles_chiral) == np.array(pred_smiles_chiral))
-        # Evaluate on molecules with chiral centers
-        chiral = np.array([[g, p] for g, p in zip(self.gold_smiles_cistrans, pred_smiles_cistrans) if '@' in g])
-        results['chiral'] = np.mean(chiral[:, 0] == chiral[:, 1]) if len(chiral) > 0 else -1
-        return results
+    n_atom_pred = mol_pred.GetNumAtoms()
+    n_atom_gt = mol_gt.GetNumAtoms()
+    assert n_atom_pred == len(mol_pred.GetAtoms())
+    assert n_atom_gt == len(mol_gt.GetAtoms())
+
+    coords_pred, bbox_pred = _get_norm_coords(mol_pred)
+    coords_gt, bbox_gt = _get_norm_coords(mol_gt)
+
+    atom_costs = np.ones((n_atom_pred, n_atom_gt), dtype=np.float32) * 1e3
+    for i, coord_pred in enumerate(coords_pred):
+        for j, coord_gt in enumerate(coords_gt):
+            atom_costs[i, j] = np.linalg.norm(coord_gt - coord_pred)
+
+    row_ind, col_ind = linear_sum_assignment(atom_costs)
+    # [print(f"{r}, {c}") for r, c in zip(row_ind, col_ind)]
+
+    atom_precisions = np.zeros(n_atom_pred, dtype=np.float32)
+    atom_recalls = np.zeros(n_atom_gt, dtype=np.float32)
+    forward_map = {}
+    reverse_map = {}
+    for r, c in zip(row_ind, col_ind):
+        forward_map[r] = c
+        reverse_map[c] = r
+        a_pred = mol_pred.GetAtomWithIdx(int(r))
+        a_gt = mol_gt.GetAtomWithIdx(int(c))
+
+        if _atom_equal(a_pred, a_gt):
+            atom_precisions[r] = 1.0
+            atom_recalls[c] = 1.0
+
+    atom_precision = np.mean(atom_precisions)
+    atom_recall = np.mean(atom_recalls)
+    atom_f1 = 2 * atom_precision * atom_recall / (atom_precision + atom_recall)
+
+    # e.g., predicted bond (1 , 2) <=> gt bond (3, 4)
+    bond_precisions = []
+    bond_recalls = []
+    for b_pred in mol_pred.GetBonds():
+        begin_atom_i_pred = b_pred.GetBeginAtomIdx()
+        end_atom_i_pred = b_pred.GetEndAtomIdx()
+        try:
+            begin_atom_i_gt = int(forward_map[begin_atom_i_pred])
+            end_atom_i_gt = int(forward_map[end_atom_i_pred])
+        except KeyError:
+            bond_precisions.append(0.0)
+            continue
+
+        b_gt = mol_gt.GetBondBetweenAtoms(
+            begin_atom_i_gt,
+            end_atom_i_gt
+        )
+        stereo_bond_type_pred = stereo_bonds_pred.get((begin_atom_i_pred, end_atom_i_pred), 0)
+        stereo_bond_type_gt = stereo_bonds_gt.get((begin_atom_i_gt, end_atom_i_gt), 0)
+        b_type_pred = _get_bond_type(b_pred, stereo_bond_type_pred)
+        b_type_gt = _get_bond_type(b_gt, stereo_bond_type_gt)
+
+        if b_gt and b_type_pred == b_type_gt:
+            bond_precisions.append(1.0)
+        else:
+            bond_precisions.append(0.0)
+
+    for b_gt in mol_gt.GetBonds():
+        begin_atom_i_gt = b_gt.GetBeginAtomIdx()
+        end_atom_i_gt = b_gt.GetEndAtomIdx()
+        try:
+            begin_atom_i_pred = int(reverse_map[begin_atom_i_gt])
+            end_atom_i_pred = int(reverse_map[end_atom_i_gt])
+        except KeyError:
+            bond_recalls.append(0.0)
+            continue
+
+        b_pred = mol_pred.GetBondBetweenAtoms(
+            begin_atom_i_pred,
+            end_atom_i_pred
+        )
+        stereo_bond_type_pred = stereo_bonds_pred.get((begin_atom_i_pred, end_atom_i_pred), 0)
+        stereo_bond_type_gt = stereo_bonds_gt.get((begin_atom_i_gt, end_atom_i_gt), 0)
+        b_type_pred = _get_bond_type(b_pred, stereo_bond_type_pred)
+        b_type_gt = _get_bond_type(b_gt, stereo_bond_type_gt)
+
+        if b_pred and b_type_pred == b_type_gt:
+            bond_recalls.append(1.0)
+        else:
+            bond_recalls.append(0.0)
+
+    bond_precision = np.mean(bond_precisions)
+    bond_recall = np.mean(bond_recalls)
+    bond_f1 = 2 * bond_precision * bond_recall / (bond_precision + bond_recall)
+
+    sgroups_pred = Chem.GetMolSubstanceGroups(mol_pred)
+    sgroups_gt = Chem.GetMolSubstanceGroups(mol_gt)
+    n_sgroup_pred = len(sgroups_pred)
+    n_sgroup_gt = len(sgroups_gt)
+
+    sgroup_costs = np.ones((n_sgroup_pred, n_sgroup_gt), dtype=np.float32) * 1e3
+    for i, sgroup_pred in enumerate(sgroups_pred):
+        brackets_pred = sgroup_pred.GetBrackets()
+        bracket_coords_pred = _get_bracket_coords(brackets_pred)
+        bracket_coords_pred, _ = normalize_nodes(bracket_coords_pred, bbox=bbox_pred)
+
+        for j, sgroup_gt in enumerate(sgroups_gt):
+            brackets_gt = sgroup_gt.GetBrackets()
+            bracket_coords_gt = _get_bracket_coords(brackets_gt)
+            bracket_coords_gt, _ = normalize_nodes(bracket_coords_gt, bbox=bbox_gt)
+
+            if not len(brackets_pred) == len(brackets_gt):
+                sgroup_costs[i, j] = 1e3
+            else:
+                sgroup_costs[i, j] = _get_bracket_cost(bracket_coords_pred, bracket_coords_gt)
+
+    row_ind, col_ind = linear_sum_assignment(sgroup_costs)
+
+    sgroup_precisions = np.zeros(n_sgroup_pred, dtype=np.float32)
+    sgroup_recalls = np.zeros(n_sgroup_gt, dtype=np.float32)
+    for r, c in zip(row_ind, col_ind):
+        sgroup_pred = sgroups_pred[int(r)]
+        sgroup_gt = sgroups_gt[int(c)]
+        sgroup_cost = sgroup_costs[int(r), int(c)]
+
+        if _sgroup_equal(sgroup_pred, sgroup_gt) and sgroup_cost < sgroup_cost_threshold:
+            sgroup_precisions[int(r)] = 1.0
+            sgroup_recalls[int(c)] = 1.0
+
+    sgroup_precision = np.mean(sgroup_precisions)
+    sgroup_recall = np.mean(sgroup_recalls)
+    sgroup_f1 = 2 * sgroup_precision * sgroup_recall / (sgroup_precision + sgroup_recall)
+
+    exact_match = (atom_f1 == 1.0) and (bond_f1 == 1.0) and (sgroup_f1 == 1.0)
+
+    metrics = {
+        "atom_precision": atom_precision,
+        "atom_recall": atom_recall,
+        "atom_f1": atom_f1,
+        "bond_precision": bond_precision,
+        "bond_recall": bond_recall,
+        "bond_f1": bond_f1,
+        "sgroup_precision": sgroup_precision,
+        "sgroup_recall": sgroup_recall,
+        "sgroup_f1": sgroup_f1,
+        "exact_match": exact_match
+    }
+
+    return metrics
+
+
+def main(args):
+    test_filelist = args.test_filelist
+    pred_root_path = args.pred_root_path
+
+    exact_matches = []
+    atom_recalls = []
+    bond_recalls = []
+
+    with open(test_filelist, "r") as f:
+        for line in f:
+            molfile_gt = line.strip().replace(".png", ".corrected.mol")
+            molfile_pred = line.strip().replace(".png", ".predicted.mol")
+            molfile_pred = "/".join(molfile_pred.split("/")[2:])
+            molfile_pred = os.path.join(pred_root_path, molfile_pred)
+
+            with open(molfile_gt, "r") as f_gt:
+                molblock_gt = f_gt.read()
+            with open(molfile_pred, "r") as f_pred:
+                molblock_pred = f_pred.read()
+            metrics = compare_molblocks(molblock_pred, molblock_gt)
+            exact_matches.append(metrics["exact_match"])
+            atom_recalls.append(metrics["atom_recall"])
+            bond_recalls.append(metrics["bond_recall"])
+
+            print(f"molfile_gt: {molfile_gt}, metrics: {metrics}")
+
+    print(f"Exact matches: {np.mean(exact_matches)}")
+    print(f"Average atom recall: {np.mean(atom_recalls)}")
+    print(f"Average bond recall: {np.mean(bond_recalls)}")
 
 
 if __name__ == "__main__":
     args = get_args()
-    gold_df = pd.read_csv(args.gold_file)
-    pred_df = pd.read_csv(args.pred_file)
-
-    if len(pred_df) != len(gold_df):
-        print(f"Pred ({len(pred_df)}) and Gold ({len(gold_df)}) have different lengths!")
-
-    # Re-order pred_df to have the same order with gold_df
-    image2goldidx = {image_id: idx for idx, image_id in enumerate(gold_df['image_id'])}
-    image2predidx = {image_id: idx for idx, image_id in enumerate(pred_df['image_id'])}
-    for image_id in gold_df['image_id']:
-        # If image_id doesn't exist in pred_df, add an empty prediction.
-        if image_id not in image2predidx:
-            pred_df = pred_df.append({'image_id': image_id, args.pred_field: ""}, ignore_index=True)
-    image2predidx = {image_id: idx for idx, image_id in enumerate(pred_df['image_id'])}
-    pred_df = pred_df.reindex([image2predidx[image_id] for image_id in gold_df['image_id']])
-
-    evaluator = SmilesEvaluator(gold_df['SMILES'], args.num_workers, args.tanimoto)
-    scores = evaluator.evaluate(pred_df[args.pred_field])
-    print(json.dumps(scores, indent=4))
+    main(args)
