@@ -24,7 +24,7 @@ FORMAT_INFO = {
     },
     "nodes": {"max_len": 384},
     "atomtok_coords": {"max_len": 480},
-    "chartok_coords": {"max_len": 480}
+    "chartok_coords": {"max_len": 640}
 }
 
 
