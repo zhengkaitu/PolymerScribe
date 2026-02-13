@@ -35,8 +35,12 @@ def parse_mol_file(mol_file: str) -> List[Tuple[int, int, int]]:
                     # coords.append([float(atom_tokens[0]), float(atom_tokens[1])])
                     pass
                 for bond_line in lines[i+1+num_atoms:i+1+num_atoms+num_bonds]:
-                    bond_tokens = bond_line.strip().split()
-                    start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
+                    # bond_tokens = bond_line.strip().split()
+                    # start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
+
+                    bond_tokens = [bond_line[:3], bond_line[3:6], bond_line[6:9], bond_line[9:12]]
+                    start, end, bond_type, stereo = [int(token) for token in bond_tokens]
+
                     if bond_type == 1:
                         if stereo == 0:
                             continue

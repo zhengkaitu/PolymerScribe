@@ -2,9 +2,12 @@
 .DS_Store
 .idea/
 data/
+data_backup*
 ckpts/
 output/
 experiments/
+predictions/
+unused*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
