@@ -48,8 +48,10 @@ def parse_molblock(molblock: str) -> dict[tuple[int, int], Any]:
             num_atoms = int(tokens[0])
             num_bonds = int(tokens[1])
             for bond_line in lines[i + 1 + num_atoms:i + 1 + num_atoms + num_bonds]:
-                bond_tokens = bond_line.strip().split()
-                start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
+                # bond_tokens = bond_line.strip().split()
+                bond_tokens = [bond_line[:3], bond_line[3:6], bond_line[6:9], bond_line[9:12]]
+                start, end, bond_type, stereo = [int(token) for token in bond_tokens]
+
                 if bond_type == 1:
                     if stereo == 0:
                         continue
@@ -161,6 +163,21 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
     stereo_bonds_pred = parse_molblock(molblock_pred)
     stereo_bonds_gt = parse_molblock(molblock_gt)
 
+    if mol_pred is None:
+        metrics = {
+            "atom_precision": 0.0,
+            "atom_recall": 0.0,
+            "atom_f1": 0.0,
+            "bond_precision": 0.0,
+            "bond_recall": 0.0,
+            "bond_f1": 0.0,
+            "sgroup_precision": 0.0,
+            "sgroup_recall": 0.0,
+            "sgroup_f1": 0.0,
+            "exact_match": 0.0
+        }
+        return metrics
+
     n_atom_pred = mol_pred.GetNumAtoms()
     n_atom_gt = mol_gt.GetNumAtoms()
     assert n_atom_pred == len(mol_pred.GetAtoms())
@@ -191,9 +208,12 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
             atom_precisions[r] = 1.0
             atom_recalls[c] = 1.0
 
-    atom_precision = np.mean(atom_precisions)
-    atom_recall = np.mean(atom_recalls)
-    atom_f1 = 2 * atom_precision * atom_recall / (atom_precision + atom_recall)
+    atom_precision = np.mean(atom_precisions) if atom_precisions.size else 0.0
+    atom_recall = np.mean(atom_recalls) if atom_recalls.size else 0.0
+    if atom_precision == 0.0 and atom_recall == 0.0:
+        atom_f1 = 0.0
+    else:
+        atom_f1 = 2 * atom_precision * atom_recall / (atom_precision + atom_recall)
 
     # e.g., predicted bond (1 , 2) <=> gt bond (3, 4)
     bond_precisions = []
@@ -246,9 +266,12 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
         else:
             bond_recalls.append(0.0)
 
-    bond_precision = np.mean(bond_precisions)
-    bond_recall = np.mean(bond_recalls)
-    bond_f1 = 2 * bond_precision * bond_recall / (bond_precision + bond_recall)
+    bond_precision = np.mean(bond_precisions) if bond_precisions else 0.0
+    bond_recall = np.mean(bond_recalls) if bond_recalls else 0.0
+    if bond_precision == 0.0 and bond_recall == 0.0:
+        bond_f1 = 0.0
+    else:
+        bond_f1 = 2 * bond_precision * bond_recall / (bond_precision + bond_recall)
 
     sgroups_pred = Chem.GetMolSubstanceGroups(mol_pred)
     sgroups_gt = Chem.GetMolSubstanceGroups(mol_gt)
@@ -259,12 +282,18 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
     for i, sgroup_pred in enumerate(sgroups_pred):
         brackets_pred = sgroup_pred.GetBrackets()
         bracket_coords_pred = _get_bracket_coords(brackets_pred)
-        bracket_coords_pred, _ = normalize_nodes(bracket_coords_pred, bbox=bbox_pred)
+        if bracket_coords_pred.size:
+            bracket_coords_pred, _ = normalize_nodes(bracket_coords_pred, bbox=bbox_pred)
+        else:
+            continue
 
         for j, sgroup_gt in enumerate(sgroups_gt):
             brackets_gt = sgroup_gt.GetBrackets()
             bracket_coords_gt = _get_bracket_coords(brackets_gt)
-            bracket_coords_gt, _ = normalize_nodes(bracket_coords_gt, bbox=bbox_gt)
+            if bracket_coords_gt.size:
+                bracket_coords_gt, _ = normalize_nodes(bracket_coords_gt, bbox=bbox_gt)
+            else:
+                continue
 
             if not len(brackets_pred) == len(brackets_gt):
                 sgroup_costs[i, j] = 1e3
@@ -284,9 +313,12 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
             sgroup_precisions[int(r)] = 1.0
             sgroup_recalls[int(c)] = 1.0
 
-    sgroup_precision = np.mean(sgroup_precisions)
-    sgroup_recall = np.mean(sgroup_recalls)
-    sgroup_f1 = 2 * sgroup_precision * sgroup_recall / (sgroup_precision + sgroup_recall)
+    sgroup_precision = np.mean(sgroup_precisions) if sgroup_precisions.size else 0.0
+    sgroup_recall = np.mean(sgroup_recalls) if sgroup_recalls.size else 0.0
+    if sgroup_precision == 0.0 and sgroup_recall == 0.0:
+        sgroup_f1 = 0.0
+    else:
+        sgroup_f1 = 2 * sgroup_precision * sgroup_recall / (sgroup_precision + sgroup_recall)
 
     exact_match = (atom_f1 == 1.0) and (bond_f1 == 1.0) and (sgroup_f1 == 1.0)
 
@@ -310,9 +342,16 @@ def main(args):
     test_filelist = args.test_filelist
     pred_root_path = args.pred_root_path
 
-    exact_matches = []
-    atom_recalls = []
-    bond_recalls = []
+    exact_matches = {}
+    atom_precisions= {}
+    atom_recalls = {}
+    atom_f1s = {}
+    bond_precisions= {}
+    bond_recalls = {}
+    bond_f1s = {}
+    sgroup_precisions= {}
+    sgroup_recalls = {}
+    sgroup_f1s = {}
 
     with open(test_filelist, "r") as f:
         for line in f:
@@ -326,15 +365,56 @@ def main(args):
             with open(molfile_pred, "r") as f_pred:
                 molblock_pred = f_pred.read()
             metrics = compare_molblocks(molblock_pred, molblock_gt)
-            exact_matches.append(metrics["exact_match"])
-            atom_recalls.append(metrics["atom_recall"])
-            bond_recalls.append(metrics["bond_recall"])
+            mol_gt = Chem.MolFromMolBlock(molblock_gt, sanitize=False, removeHs=False, strictParsing=True)
+            atom_count = mol_gt.GetNumAtoms()
+            sgroups_gt = Chem.GetMolSubstanceGroups(mol_gt)
+            bracket_count = 0
+            for sgroup_gt in sgroups_gt:
+                bracket_count += len(sgroup_gt.GetBrackets())
+
+            count = atom_count // 10 * 10
+            count = min(count, 50)
+            # count = bracket_count
+            if count in exact_matches:
+                exact_matches[count].append(metrics["exact_match"])
+                atom_precisions[count].append(metrics["atom_precision"])
+                atom_recalls[count].append(metrics["atom_recall"])
+                atom_f1s[count].append(metrics["atom_f1"])
+                bond_precisions[count].append(metrics["bond_precision"])
+                bond_recalls[count].append(metrics["bond_recall"])
+                bond_f1s[count].append(metrics["bond_f1"])
+                sgroup_precisions[count].append(metrics["sgroup_precision"])
+                sgroup_recalls[count].append(metrics["sgroup_recall"])
+                sgroup_f1s[count].append(metrics["sgroup_f1"])
+            else:
+                exact_matches[count] = [metrics["exact_match"]]
+                atom_precisions[count] = [metrics["atom_precision"]]
+                atom_recalls[count] = [metrics["atom_recall"]]
+                atom_f1s[count] = [metrics["atom_f1"]]
+                bond_precisions[count] = [metrics["bond_precision"]]
+                bond_recalls[count] = [metrics["bond_recall"]]
+                bond_f1s[count] = [metrics["bond_f1"]]
+                sgroup_precisions[count] = [metrics["sgroup_precision"]]
+                sgroup_recalls[count] = [metrics["sgroup_recall"]]
+                sgroup_f1s[count] = [metrics["sgroup_f1"]]
+
 
             print(f"molfile_gt: {molfile_gt}, metrics: {metrics}")
 
-    print(f"Exact matches: {np.mean(exact_matches)}")
-    print(f"Average atom recall: {np.mean(atom_recalls)}")
-    print(f"Average bond recall: {np.mean(bond_recalls)}")
+    print(pred_root_path)
+    for count in sorted(exact_matches.keys()):
+        # print(f"count: {count} - {count+19}, "
+        print(f"count: {count}, occurrences: {len(exact_matches[count])}, "
+              f"Exact matches: {np.mean(exact_matches[count]): .2f}, "
+              # f"AP: {np.mean(atom_precisions[count]): .4f}, "
+              # f"AR: {np.mean(atom_recalls[count]): .4f}, "
+              f"Atom F1: {np.mean(atom_f1s[count]): .4f}, "
+              # f"BP: {np.mean(bond_precisions[count]): .4f}, "
+              # f"BR: {np.mean(bond_recalls[count]): .4f}, "
+              f"Bond F1: {np.mean(bond_f1s[count]): .4f}, "
+              # f"SP: {np.mean(sgroup_precisions[count]): .4f}, "
+              # f"SR: {np.mean(sgroup_recalls[count]): .4f}, "
+              f"Sgroup F1: {np.mean(sgroup_f1s[count]): .4f}")
 
 
 if __name__ == "__main__":
