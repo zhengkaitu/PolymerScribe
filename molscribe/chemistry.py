@@ -132,9 +132,19 @@ def _add_sgroup(
     bracket_coords: List[Tuple[float, float]]
 ):
     # mol is edited in-place
-    # print(bracket_symbols)
     sep_indices = [i for i, coord in enumerate(bracket_coords) if coord is None]
     start_indices = [0] + [i + 1 for i in sep_indices[:-1]]
+
+    # Atom positions from the conformer.  The conformer stores (x, 1-y, 0), matching
+    # the y-flip applied to bracket coords below.
+    atom_positions = []
+    try:
+        conf = mol.GetConformer()
+        for i in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            atom_positions.append((pos.x, pos.y))
+    except Exception:
+        pass
 
     for start_i, end_i in zip(start_indices, sep_indices):
         symbols = bracket_symbols[start_i:end_i]
@@ -155,6 +165,9 @@ def _add_sgroup(
         else:
             sg = Chem.CreateMolSubstanceGroup(mol, type="GEN")
 
+        # Parse bracket line segments and register them on the SGroup.
+        # Apply the same y-flip as the atom conformer: (x, 1-y).
+        brackets = []   # list of ((bx, by), (kx, ky)) in conformer space
         for j in range(0, len(symbols) - 1, 2):
             assert symbols[j] == "<bra>"
             assert symbols[j+1] == "<ket>"
@@ -163,12 +176,82 @@ def _add_sgroup(
 
             bra = Point3D(coords[j][0], 1 - coords[j][1], 0.0)
             ket = Point3D(coords[j+1][0], 1 - coords[j+1][1], 0.0)
-            bracket = [bra, ket, Point3D(0.0, 0.0, 0.0)]
-            sg.AddBracket(bracket)
+            sg.AddBracket([bra, ket, Point3D(0.0, 0.0, 0.0)])
+            brackets.append(((bra.x, bra.y), (ket.x, ket.y)))
 
-            # add one atom and bond for the sake of completion
-            sg.AddAtomWithIdx(0)
-            sg.AddBondWithIdx(0)
+        if not atom_positions or len(brackets) < 2:
+            continue
+
+        # Interior reference: centroid of all bracket midpoints.
+        # Used to identify which side of each bracket line is "inside".
+        interior_ref = (
+            np.mean([(b[0][0] + b[1][0]) / 2 for b in brackets]),
+            np.mean([(b[0][1] + b[1][1]) / 2 for b in brackets]),
+        )
+
+        # Step 1: find bonds whose segment properly intersects a bracket segment.
+        # Two line segments AB and CD intersect iff:
+        #   - A and B are on opposite sides of line CD, AND
+        #   - C and D are on opposite sides of line AB.
+        crossing_bond_idxs = set()
+        for bond in mol.GetBonds():
+            a1, a2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            p1, p2 = atom_positions[a1], atom_positions[a2]
+            for (bx, by), (kx, ky) in brackets:
+                # Condition 1: atom endpoints straddle the bracket's infinite line.
+                dx, dy = kx - bx, ky - by
+                nx, ny = -dy, dx
+                s1 = nx * (p1[0] - bx) + ny * (p1[1] - by)
+                s2 = nx * (p2[0] - bx) + ny * (p2[1] - by)
+                if s1 * s2 >= 0:
+                    continue
+                # Condition 2: bracket endpoints straddle the bond's infinite line.
+                bdx, bdy = p2[0] - p1[0], p2[1] - p1[1]
+                bnx, bny = -bdy, bdx
+                t1 = bnx * (bx - p1[0]) + bny * (by - p1[1])
+                t2 = bnx * (kx - p1[0]) + bny * (ky - p1[1])
+                if t1 * t2 < 0:
+                    crossing_bond_idxs.add(bond.GetIdx())
+                    break
+
+        # Step 2: for each crossing bond, identify its "inside" endpoint — the atom on
+        # the same side of the crossed bracket line as interior_ref.
+        inside_seeds = set()
+        for bond_idx in crossing_bond_idxs:
+            bond = mol.GetBondWithIdx(bond_idx)
+            a1, a2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            p1, p2 = atom_positions[a1], atom_positions[a2]
+            for (bx, by), (kx, ky) in brackets:
+                dx, dy = kx - bx, ky - by
+                nx, ny = -dy, dx
+                s1 = nx * (p1[0] - bx) + ny * (p1[1] - by)
+                s2 = nx * (p2[0] - bx) + ny * (p2[1] - by)
+                if s1 * s2 < 0:   # this is the bracket being crossed
+                    s_ref = nx * (interior_ref[0] - bx) + ny * (interior_ref[1] - by)
+                    inside_seeds.add(a1 if s_ref * s1 >= 0 else a2)
+                    break
+
+        # Step 3: cut the molecule at crossing bonds and enumerate connected fragments.
+        # RemoveBond preserves atom indices, so GetMolFrags returns original atom indices.
+        mol_cut = Chem.RWMol(mol)
+        for bond_idx in crossing_bond_idxs:
+            bond = mol.GetBondWithIdx(bond_idx)
+            mol_cut.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+        frags = Chem.GetMolFrags(mol_cut)   # tuple of tuples of original atom indices
+
+        # Step 4: collect all fragments that contain at least one inside seed.
+        # This handles atoms whose coordinates extend past the bracket lines: they are
+        # included because their whole connected fragment is pulled in via the seed.
+        inside_atoms = set()
+        for frag in frags:
+            if inside_seeds.intersection(frag):
+                inside_atoms.update(frag)
+
+        # Step 5: register inside atoms and crossing bonds on the SGroup.
+        for atom_idx in sorted(inside_atoms):
+            sg.AddAtomWithIdx(atom_idx)
+        for bond_idx in sorted(crossing_bond_idxs):
+            sg.AddBondWithIdx(bond_idx)
 
     return mol
 
