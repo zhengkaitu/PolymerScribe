@@ -52,7 +52,7 @@ class PolymerScribeAPI:
         try:
             response = self.session.post(
                 url=self.bigsmiles_url,
-                json={"molblock": molblock},
+                json={"molblock_string": molblock},
                 timeout=30
             )
             output = response.json()
@@ -72,8 +72,10 @@ def PolymerScribeService(png_file: UploadFile, return_bigsmiles: bool = False):
         fn = png_file.filename
         print(f"Uploaded filename: {fn}")
         contents = png_file.file.read()
+        with open(fn, "wb") as f:
+            f.write(contents)
 
-        molblock = polymserscribe_api.predict_molblock(contents)
+        molblock = polymserscribe_api.predict_molblock(image_path=fn)
 
         if not molblock:
             response["status"] = "FAIL"

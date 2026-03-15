@@ -4,6 +4,10 @@ This is the repository for PolymerScribe, an image-to-graph model that translate
 
 ## Deployment (requiring Docker)
 
+- **OS**: Ubuntu (>= 20.04) recommended.
+- **docker** (\>= version 20). See [Install docker](https://docs.docker.com/engine/install/).
+- **git** and **make**.
+
 ### 1. Build and start the containerized service for BigSMILES conversion.
 
 This service provides endpoints for two-way translation between molblocks and BigSMILES. It is required if you want to obtain the BigSMILES (in addition to the molblock) of the image being recognized.
@@ -26,6 +30,7 @@ $ cd ..
 ### 2. Build and start the containerized service for polymer structure recognition using PolymerScribe.
 
 ```shell
+$ sh scripts/download_polymerscribe_model.sh
 $ make build-polymerscribe-image
 $ make start-polymerscribe-service
 ````
@@ -37,10 +42,13 @@ $ make stop-polymerscribe-service
 ```
 
 ### 3. Query the recognition service
-We provide sample query commands in `scripts/query.sh`, which can be executed from the command line
+
+Once started, the API documentation would be available at `http://0.0.0.0:3310/docs`, where you can upload polymer structures (as .png image), try out the API, and get the molblock string (and optionally the BigSMILES representation) in return.
+
+We also provide sample query commands in `scripts/query.sh`, which can be executed from the command line
 
 ```shell
-$ bash scripts/query.sh
+$ sh scripts/query.sh
 ```
 
 The responses from the service will be printed to the terminal, e.g.,

@@ -13,10 +13,10 @@ download-polymerscribe-model:
 	sh scripts/download_polymerscribe_model.sh
 
 start-polymerscribe-service:
-	docker run -d \
+	docker run -d --rm \
 		--name polymerscribe-server \
-		-p 3310:3310 \
-		--rm polymerscribe-server:$(TAG)
+		--network=host \
+		-t polymerscribe-server:$(TAG)
 
 stop-polymerscribe-service:
 	docker stop polymerscribe-server

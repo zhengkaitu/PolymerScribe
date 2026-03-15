@@ -1,0 +1,12 @@
+bigsmiles*
+ckpts/
+data/
+experiments/
+logs/
+output/
+predictions/
+__pycache__/
+scripts/
+*0126/
+
+!/output/r1a/best.pth
