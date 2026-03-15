@@ -45,6 +45,16 @@ if __name__ == "__main__":
         ("./data/realistic_images_processed", "ladder/polymer")
     ]
 
+    # sources = [
+    #     ("./data", "EDU-CHEMC_test_single_mol")
+    # ]
+    # sources = [
+    #     ("./data", "BASF_screenshots")
+    # ]
+    # sources = [
+    #     ("./data", "m2s_images")
+    # ]
+
     root_output_path = f"predictions/image_comparison_{args.id}"
     os.makedirs(root_output_path, exist_ok=True)
 

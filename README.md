@@ -45,47 +45,75 @@ $ bash scripts/query.sh
 
 The responses from the service will be printed to the terminal, e.g.,
 ```shell
-{
-  "molblock": str,
-  "bigsmiles": str
+{ 
+  "status": "SUCCESS",
+  "error": "",
+  "result": {
+    "molblock": str,
+    "bigsmiles": str
+  }
 }
 ```
 
-## Training and benchmarking (requiring Conda)
+## Training and benchmarking (coming soon)
 
-### 1. Create the Conda environment
+[//]: # (### 1. Create the Conda environment)
 
-```shell
-$ conda create -y -n polymerscribe -c conda-forge python=3.9 ipykernel jupyterlab=4.0.13 packaging=21.3
-$ conda activate polymerscribe
-$ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
-$ pip install -r requirements.txt
-```
+[//]: # ()
+[//]: # (```shell)
 
-The following steps assume that the `polymerscribe` environment has been activated.
+[//]: # ($ conda create -y -n polymerscribe -c conda-forge python=3.9 ipykernel jupyterlab=4.0.13 packaging=21.3)
 
-### 2. Prepare the data
+[//]: # ($ conda activate polymerscribe)
 
-```shell
-$ bash scripts/download_polymerlit_data.sh
-```
+[//]: # ($ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116)
 
+[//]: # ($ pip install -r requirements.txt)
 
-### 3. Download pretrained MolScribe checkpoint
+[//]: # (```)
 
-```shell
-$ bash scripts/download_molscribe_checkpoint.sh
-```
+[//]: # ()
+[//]: # (The following steps assume that the `polymerscribe` environment has been activated.)
 
-### 4. Train PolymerScribe
+[//]: # ()
+[//]: # (### 2. Prepare the data)
 
-```shell
-$ bash scripts/train_polymerlit.sh
-```
+[//]: # ()
+[//]: # (```shell)
 
-### 5. Predict and evaluate with PolymerScribe
+[//]: # ($ bash scripts/download_polymerlit_data.sh)
 
-```shell
-$ bash scripts/predict_polymerlit.sh
-$ bash scripts/evaluate_polymerlit.sh
-```
+[//]: # (```)
+
+[//]: # ()
+[//]: # ()
+[//]: # (### 3. Download pretrained MolScribe checkpoint)
+
+[//]: # ()
+[//]: # (```shell)
+
+[//]: # ($ bash scripts/download_molscribe_checkpoint.sh)
+
+[//]: # (```)
+
+[//]: # ()
+[//]: # (### 4. Train PolymerScribe)
+
+[//]: # ()
+[//]: # (```shell)
+
+[//]: # ($ bash scripts/train_polymerlit.sh)
+
+[//]: # (```)
+
+[//]: # ()
+[//]: # (### 5. Predict and evaluate with PolymerScribe)
+
+[//]: # ()
+[//]: # (```shell)
+
+[//]: # ($ bash scripts/predict_polymerlit.sh)
+
+[//]: # ($ bash scripts/evaluate_polymerlit.sh)
+
+[//]: # (```)
