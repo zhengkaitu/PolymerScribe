@@ -44,6 +44,28 @@ app.post('/api/bigsmiles-to-molblock', async (req, res) => {
     try {
         // Call the function from the npm package
         const molblock = toolkit.bigsmiles_to_molfile(rdkit, bigsmiles)
+
+        // Send the result back as a JSON response
+        res.status(200).json({
+            success: true,
+            data: molblock
+        });
+
+    } catch (error) {
+        console.error("Error processing request:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to process data using toolkit.bigsmiles_to_molfile()."
+        });
+    }
+});
+
+app.post('/api/bigsmiles-to-svg', async (req, res) => {
+    const bigsmiles = req.body.bigsmiles;
+
+    try {
+        // Call the function from the npm package
+        const molblock = toolkit.bigsmiles_to_molfile(rdkit, bigsmiles)
         const svg = toolkit.molfile_to_depiction(rdkit, molblock)
             .replaceAll("#FFFFFF", "#FFF")
             .replaceAll(
