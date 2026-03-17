@@ -44,11 +44,20 @@ app.post('/api/bigsmiles-to-molblock', async (req, res) => {
     try {
         // Call the function from the npm package
         const molblock = toolkit.bigsmiles_to_molfile(rdkit, bigsmiles)
+        const svg = toolkit.molfile_to_depiction(rdkit, molblock)
+            .replaceAll("#FFFFFF", "#FFF")
+            .replaceAll(
+                "width='250px' height='200px'",
+                `width='750px' height='500px'`
+            );
+
+        const regex = /(#[0-9a-f]{6})/gi;
+        const blackSVG = svg.replace(regex, "#000000");
 
         // Send the result back as a JSON response
         res.status(200).json({
             success: true,
-            data: molblock
+            data: blackSVG
         });
 
     } catch (error) {
