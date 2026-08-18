@@ -2249,6 +2249,8 @@ def canonicalize_bigsmiles(bigsmiles, output_folder="Output", plot=False):
     Returns: canonical BigSMILES
 
     """
+    os.makedirs(output_folder, exist_ok=True)
+
     # Generate all possible atomistic and topology graphs
     graphs = generate_all_possible_graphs(input_string=bigsmiles)
 
@@ -2302,7 +2304,11 @@ def canonicalize_bigsmiles(bigsmiles, output_folder="Output", plot=False):
         index += 1
 
     # Choose one string from the set of BigSMILES strings
-    canonical_bigsmiles = choose_one_bigsmiles(bigsmiles_list)
+    if bigsmiles_list:
+        canonical_bigsmiles = choose_one_bigsmiles(bigsmiles_list)
+    else:
+        print("Empty bigsmiles_list, returning the original bigsmiles")
+        canonical_bigsmiles = bigsmiles
 
     # Save a text file with the initial BigSMILES, canonical BigSMILEs and other options
     save_bigsmiles_file(original_bigsmiles=bigsmiles,

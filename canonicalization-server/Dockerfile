@@ -3,7 +3,7 @@ FROM mambaorg/micromamba:1.4.7
 USER root
 # Keep the base environment activated
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
-RUN apt update && apt -y install curl git gcc g++ make
+RUN apt update && apt -y install curl git gcc g++ graphviz make libxrender1
 
 COPY requirements.txt  /tmp/requirements.txt
 WORKDIR /tmp
@@ -15,7 +15,7 @@ RUN pip install -r requirements.txt
 COPY . /canonicalization-server
 WORKDIR /canonicalization-server
 
-EXPOSE 3328
+EXPOSE 3319
 
 #CMD ["python", "canonicalization_server.py"]
 CMD ["python", "test.py"]
