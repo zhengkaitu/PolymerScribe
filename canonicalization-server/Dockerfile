@@ -17,5 +17,4 @@ WORKDIR /canonicalization-server
 
 EXPOSE 3319
 
-#CMD ["python", "canonicalization_server.py"]
-CMD ["python", "test.py"]
+CMD ["python", "canonicalization_server.py"]

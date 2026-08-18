@@ -1,5 +1,8 @@
 import os
+import requests
 import time
+
+
 from canon_tools import canonicalize_bigsmiles
 
 validation_set = [
@@ -75,12 +78,25 @@ def test():
         start = time.time()
 
         print(f"Canonicalizing {bigsmiles}", flush=True)
-        canonical = canonicalize_bigsmiles(
-            bigsmiles=bigsmiles,
-            output_folder=os.path.join("Output", subfolder_name),
-            plot=False
-        )
-        print(f"Time: {time.time() - start: .2f} s    {canonical}", flush=True)
+
+        # canonical = canonicalize_bigsmiles(
+        #     bigsmiles=bigsmiles,
+        #     output_folder=os.path.join("Output", subfolder_name),
+        #     plot=False
+        # )
+        #
+        # print(f"Time: {time.time() - start: .2f} s    {canonical}", flush=True)
+
+        try:
+            resp = requests.post(
+                url="http://0.0.0.0:3319/canonicalize-bigsmiles/",
+                json={"bigsmiles": bigsmiles},
+                timeout=300
+            )
+
+            print(f"Time: {time.time() - start: .2f} s    {resp.json()}", flush=True)
+        except requests.exceptions.Timeout:
+            print("The request timed out!")
 
 
 if __name__ == "__main__":

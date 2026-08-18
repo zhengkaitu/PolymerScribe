@@ -6,11 +6,7 @@ build-canonicalization-image:
 	docker build -t canonicalization-server:$(TAG) .
 
 start-canonicalization-service:
-	#docker run -d \
-#		--name canonicalization-server \
-#		-p 3319:3319 \
-#		--rm canonicalization-server:$(TAG)
-	docker run \
+	docker run -d \
 		--name canonicalization-server \
 		-p 3319:3319 \
 		--rm canonicalization-server:$(TAG)
