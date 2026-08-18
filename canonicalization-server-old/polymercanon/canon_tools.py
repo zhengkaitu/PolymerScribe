@@ -2290,6 +2290,7 @@ def canonicalize_bigsmiles(bigsmiles, output_folder="Output", plot=False):
 
         # Add to list of BigSMILES
         bigsmiles_list.append(_bigsmiles)
+
         # Save BigSMILES to text file
         with open(os.path.join(_output_folder, "Canonical_BigSMILES.txt"), "w") as f:
             # Write initial BigSMILES
@@ -2301,13 +2302,13 @@ def canonicalize_bigsmiles(bigsmiles, output_folder="Output", plot=False):
 
     # Choose one string from the set of BigSMILES strings
     canonical_bigsmiles = choose_one_bigsmiles(bigsmiles_list)
-    """
+
     # Save a text file with the initial BigSMILES, canonical BigSMILEs and other options
     save_bigsmiles_file(original_bigsmiles=bigsmiles,
                         canonical_bigsmiles=canonical_bigsmiles,
                         bigsmiles_list=bigsmiles_list,
                         output_folder=output_folder)
-    """
+
     return canonical_bigsmiles
 
 def canonicalization_unit_testing(sheet_name):
@@ -2492,9 +2493,8 @@ if __name__ == "__main__":
         canonical = canonicalize_bigsmiles(bigsmiles=bigsmiles,
                                            output_folder=os.path.join(output_folder, subfolder_name),
                                            plot=True)
-        print(canonical)
-    #     # Add to dataframe
-    #     results.loc[index, "Canonical"] = canonical
-    #     results.loc[index, "BigSMILES"] = bigsmiles
-    # # Save as Excel file
-    # results.to_excel(os.path.join(output_folder, "Results.xlsx"))
+        # Add to dataframe
+        results.loc[index, "Canonical"] = canonical
+        results.loc[index, "BigSMILES"] = bigsmiles
+    # Save as Excel file
+    results.to_excel(os.path.join(output_folder, "Results.xlsx"))
