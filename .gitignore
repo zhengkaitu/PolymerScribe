@@ -14,6 +14,7 @@ scripts/archives/
 figures/
 README_extended.md
 visualization*
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
