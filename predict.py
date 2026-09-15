@@ -24,36 +24,46 @@ if __name__ == "__main__":
     device = torch.device('cuda')
     model = MolScribe(args.model_path, device) if args.model_path else None
 
+    # sources = [
+    #     ("./data", "mt_images_processed"),
+    #     ("./data/olsen_images_processed", "bigsmiles_manuscript"),
+    #     ("./data/olsen_images_processed", "bigsmiles_si"),
+    #     ("./data/olsen_images_processed", "canonicalization_manuscript"),
+    #     ("./data/olsen_images_processed", "canonicalization_si"),
+    #     ("./data/olsen_images_processed", "non-covalent_manuscript"),
+    #     ("./data/olsen_images_processed", "non-covalent_si"),
+    #     ("./data/realistic_images_processed", "generic/acspolymersau"),
+    #     ("./data/realistic_images_processed", "generic/acsmacrolett"),
+    #     ("./data/realistic_images_processed", "generic/macromolecules"),
+    #     ("./data/realistic_images_processed", "ladder/acsmacrolett"),
+    #     ("./data/realistic_images_processed", "ladder/angewchemie"),
+    #     ("./data/realistic_images_processed", "ladder/chemengjournal"),
+    #     ("./data/realistic_images_processed", "ladder/chemicalscience"),
+    #     ("./data/realistic_images_processed", "ladder/digitaldiscovery"),
+    #     ("./data/realistic_images_processed", "ladder/faradaydiscussions"),
+    #     ("./data/realistic_images_processed", "ladder/macromolecules"),
+    #     ("./data/realistic_images_processed", "ladder/polymer")
+    # ]
     sources = [
-        ("./data", "mt_images_processed"),
-        ("./data/olsen_images_processed", "bigsmiles_manuscript"),
-        ("./data/olsen_images_processed", "bigsmiles_si"),
-        ("./data/olsen_images_processed", "canonicalization_manuscript"),
-        ("./data/olsen_images_processed", "canonicalization_si"),
-        ("./data/olsen_images_processed", "non-covalent_manuscript"),
-        ("./data/olsen_images_processed", "non-covalent_si"),
-        ("./data/realistic_images_processed", "generic/acspolymersau"),
-        ("./data/realistic_images_processed", "generic/acsmacrolett"),
-        ("./data/realistic_images_processed", "generic/macromolecules"),
-        ("./data/realistic_images_processed", "ladder/acsmacrolett"),
-        ("./data/realistic_images_processed", "ladder/angewchemie"),
-        ("./data/realistic_images_processed", "ladder/chemengjournal"),
-        ("./data/realistic_images_processed", "ladder/chemicalscience"),
-        ("./data/realistic_images_processed", "ladder/digitaldiscovery"),
-        ("./data/realistic_images_processed", "ladder/faradaydiscussions"),
-        ("./data/realistic_images_processed", "ladder/macromolecules"),
-        ("./data/realistic_images_processed", "ladder/polymer")
+        ("./data/PolymerLit", "PolymerLit-MT_processed"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "bigsmiles_manuscript"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "bigsmiles_si"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "canonicalization_manuscript"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "canonicalization_si"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "non-covalent_manuscript"),
+        ("./data/PolymerLit/PolymerLit-Olsen_processed", "non-covalent_si"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "generic/acspolymersau"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "generic/acsmacrolett"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "generic/macromolecules"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/acsmacrolett"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/angewchemie"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/chemengjournal"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/chemicalscience"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/digitaldiscovery"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/faradaydiscussions"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/macromolecules"),
+        ("./data/PolymerLit/PolymerLit-OA_processed", "ladder/polymer")
     ]
-
-    # sources = [
-    #     ("./data", "EDU-CHEMC_test_single_mol")
-    # ]
-    # sources = [
-    #     ("./data", "BASF_screenshots")
-    # ]
-    # sources = [
-    #     ("./data", "m2s_images")
-    # ]
 
     root_output_path = f"predictions/image_comparison_{args.id}"
     os.makedirs(root_output_path, exist_ok=True)

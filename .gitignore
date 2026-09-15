@@ -7,7 +7,13 @@ ckpts/
 output/
 experiments/
 predictions/
+bigsmiles_analysis/
+notebook/
 unused*
+scripts/archives/
+figures/
+README_extended.md
+visualization*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
