@@ -1,4 +1,4 @@
-FROM mambaorg/micromamba:1.4.7
+FROM mambaorg/micromamba:2.9.0-debian13-slim
 
 USER root
 # Keep the base environment activated

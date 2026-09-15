@@ -10,7 +10,7 @@ This is the repository for PolymerScribe, an image-to-graph model that translate
 
 ### 1. Build and start the containerized service for BigSMILES conversion.
 
-This service provides endpoints for two-way translation between molblocks and BigSMILES. It is required if you want to obtain the BigSMILES (in addition to the molblock) of the image being recognized.
+This service provides endpoints for two-way translation between molblocks and BigSMILES, based on [Deagen et al.](https://doi.org/10.1021/acs.macromol.3c01378) It is required if you want to obtain the BigSMILES (in addition to the molblock) of the image being recognized.
 
 ```shell
 $ cd bigsmiles-server
@@ -27,7 +27,26 @@ $ make stop-bigsmiles-service
 $ cd ..
 ```
 
-### 2. Build and start the containerized service for polymer structure recognition using PolymerScribe.
+### 2. Build and start the containerized service for BigSMILES canonicalization.
+
+This service provides endpoints for BigSMILES canonicalization, based on [Leão et al.](https://doi.org/10.1021/acs.jcim.5c02784) It is required if you want to obtain the canonical BigSMILES, especially if you want to evaluate performance with consideration of graph isomorphism.
+
+```shell
+$ cd canonicalization-server
+$ make build-canonicalization-image
+$ make start-canonicalization-service
+$ cd ..
+```
+
+The service can be stopped when no longer needed via
+
+```shell
+$ cd canonicalization-server
+$ make stop-canonicalization-service
+$ cd ..
+```
+
+### 3. Build and start the containerized service for polymer structure recognition using PolymerScribe.
 
 ```shell
 $ sh scripts/download_polymerscribe_model.sh
