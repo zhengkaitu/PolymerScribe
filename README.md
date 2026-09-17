@@ -82,6 +82,48 @@ The responses from the service will be printed to the terminal, e.g.,
 }
 ```
 
+## Utilities
+
+### Canonical BigSMILES for the PolymerLit ground truth
+
+`utilities/get_all_canonical_bigsmiles.py` walks every `*.corrected.mol` under
+`data/PolymerLit/` (at any depth), converts each molblock to BigSMILES via the
+bigsmiles-server, canonicalizes it via the canonicalization-server, and writes
+`data/PolymerLit/canonical_bigsmiles.tsv` with three tab-separated columns:
+the path relative to `data/PolymerLit/`, the BigSMILES, and the canonical
+BigSMILES.
+
+Both services must be running:
+
+```shell
+$ cd bigsmiles-server && make build-bigsmiles-image && make start-bigsmiles-service && cd ..
+$ cd canonicalization-server && make build-canonicalization-image && make start-canonicalization-service && cd ..
+$ python utilities/get_all_canonical_bigsmiles.py
+```
+
+The script refuses to start if either service is unreachable, and prints the
+`make` target that starts it.
+
+Some PolymerLit structures contain nested stochastic objects that make the
+canonicalization server's graph enumeration exhaust memory, so
+`start-canonicalization-service` runs the container under a memory limit and a
+restart policy (see `canonicalization-server/Makefile`, overridable via
+`MEMORY_LIMIT` and `RESTART_POLICY`). The script cooperates with this: it
+distinguishes a slow molecule (recorded as a failure), from an input that
+crashes the service (retried once, then recorded as a failure), from a service
+that is gone for good (the run aborts rather than emitting placeholder rows).
+
+On failure the BigSMILES column reads `failed to obtain BigSMILES`, and the
+canonical column repeats whatever the BigSMILES column holds.
+
+Progress is written to the TSV after every row. If a run aborts, restart the
+service and continue where it left off:
+
+```shell
+$ cd canonicalization-server && make stop-canonicalization-service && make start-canonicalization-service && cd ..
+$ python utilities/get_all_canonical_bigsmiles.py --resume
+```
+
 ## Training and benchmarking (coming soon)
 
 [//]: # (### 1. Create the Conda environment)
