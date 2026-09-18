@@ -1,17 +1,61 @@
 import argparse
+import csv
 import numpy as np
 import os
+import sys
+from collections import Counter
 from rdkit import Chem
 from scipy.optimize import linear_sum_assignment
 from typing import Any
 
+from utilities.canonical_bigsmiles_api import (
+    FAILED_BIGSMILES,
+    FIELDNAMES,
+    STATUS_BIGSMILES_FAILED,
+    STATUS_SUCCESS,
+    ServerUnavailableError,
+    add_server_args,
+    api_from_args,
+    check_servers,
+    load_existing_rows,
+    sanitize,
+    write_rows,
+)
+from utilities.paths import (
+    gt_molfile_for_image,
+    gt_tsv_key,
+    iter_filelist,
+    pred_molfile_for_image,
+)
+
 sgroup_cost_threshold = 1.0
+
+# Ground truth we have no canonical BigSMILES for at all.
+GT_MISSING = "GT_MISSING"
 
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Score predicted molblocks against the ground truth"
+    )
     parser.add_argument("--test_filelist", type=str, default=None, required=True)
     parser.add_argument("--pred_root_path", type=str, default=None, required=True)
+    parser.add_argument("--canonical_match", action="store_true",
+                        help="also score canonical BigSMILES equality; needs "
+                             "both services up")
+    parser.add_argument("--gt_canonical_tsv", type=str,
+                        default="data/PolymerLit/canonical_bigsmiles.tsv")
+    parser.add_argument("--data_root", type=str, default="data/PolymerLit",
+                        help="only used to key into --gt_canonical_tsv")
+    parser.add_argument("--gt_status_valid", type=str, default="SUCCESS,NOOP",
+                        help="ground-truth statuses whose canonical BigSMILES "
+                             "is usable; anything else counts as a non-match")
+    parser.add_argument("--pred_canonical_tsv", type=str, default=None,
+                        help="cache of predicted canonicals; defaults to "
+                             "<pred_root_path>/canonical_bigsmiles.pred.tsv")
+    parser.add_argument("--no_pred_cache", action="store_true",
+                        help="do not read or write the prediction cache")
+    add_server_args(parser)
 
     return parser.parse_args()
 
@@ -338,83 +382,237 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
     return metrics
 
 
+def load_gt_canonical(tsv_path: str) -> dict[str, tuple[str, str]]:
+    """TSV key -> (canonical_bigsmiles, status).
+
+    Older TSVs have no status column. Two of the three cases are still
+    decidable from the strings, but "canonical equals its input" is not: it
+    means either a genuine failure or an already-canonical molecule. Those are
+    reported so the file can be regenerated with --reclassify rather than
+    silently scored as if they were valid.
+    """
+    gt = {}
+    ambiguous = 0
+
+    with open(tsv_path, "r", newline="") as tsvfile:
+        for row in csv.DictReader(tsvfile, delimiter="\t"):
+            status = (row.get("status") or "").strip()
+            if not status:
+                if row["bigsmiles"] == FAILED_BIGSMILES:
+                    status = STATUS_BIGSMILES_FAILED
+                elif row["canonical_bigsmiles"] != row["bigsmiles"]:
+                    status = STATUS_SUCCESS
+                else:
+                    ambiguous += 1
+                    status = ""
+            gt[row["path"]] = (row["canonical_bigsmiles"], status)
+
+    print(f"Loaded {len(gt)} ground-truth canonical BigSMILES from {tsv_path}")
+    if ambiguous:
+        print(
+            f"WARNING: {ambiguous} rows have no status and cannot be judged "
+            f"(canonical equals its input). Regenerate with:\n"
+            f"    python -m utilities.get_all_canonical_bigsmiles --reclassify"
+        )
+
+    return gt
+
+
+def score_canonical(api, molblock_pred: str, canonical_gt: str,
+                    gt_status: str, valid_statuses: set) -> tuple:
+    """Compare a prediction's canonical BigSMILES with the ground truth.
+
+    Returns (is_match, pred_bigsmiles, pred_canonical, pred_status).
+
+    A ground truth we cannot canonicalize counts as a non-match rather than
+    being dropped, so the metric stays conservative: every test sample is in
+    the denominator. Such rows are not sent to the server at all, and are
+    tallied separately so the ceiling they impose stays visible.
+    """
+    if gt_status not in valid_statuses:
+        return False, "", "", gt_status or GT_MISSING
+
+    pred_bigsmiles = api.molblock_to_bigsmiles(molblock_pred)
+    if pred_bigsmiles == FAILED_BIGSMILES:
+        return False, pred_bigsmiles, pred_bigsmiles, STATUS_BIGSMILES_FAILED
+
+    pred_canonical, pred_status = api.canonicalize_with_status(pred_bigsmiles)
+    is_match = sanitize(pred_canonical).strip() == sanitize(canonical_gt).strip()
+
+    return is_match, pred_bigsmiles, pred_canonical, pred_status
+
+
 def main(args):
-    test_filelist = args.test_filelist
+    assert os.path.isdir("data"), "run from the repo root"
+
     pred_root_path = args.pred_root_path
 
     exact_matches = {}
-    atom_precisions= {}
+    atom_precisions = {}
     atom_recalls = {}
     atom_f1s = {}
-    bond_precisions= {}
+    bond_precisions = {}
     bond_recalls = {}
     bond_f1s = {}
-    sgroup_precisions= {}
+    sgroup_precisions = {}
     sgroup_recalls = {}
     sgroup_f1s = {}
+    canonical_matches = {}
 
-    with open(test_filelist, "r") as f:
-        for line in f:
-            molfile_gt = line.strip().replace(".png", ".corrected.mol")
-            molfile_pred = line.strip().replace(".png", ".predicted.mol")
-            molfile_pred = "/".join(molfile_pred.split("/")[2:])
-            molfile_pred = os.path.join(pred_root_path, molfile_pred)
+    api = None
+    gt_canonical = {}
+    valid_statuses = set()
+    cache_rows = {}
+    cache_path = None
+    # Ground truths whose own canonical BigSMILES could not be obtained; they
+    # count as non-matches, and this is what makes the ceiling visible.
+    uncanonicalizable = Counter()
+    server_aborted = False
 
-            with open(molfile_gt, "r") as f_gt:
-                molblock_gt = f_gt.read()
-            with open(molfile_pred, "r") as f_pred:
-                molblock_pred = f_pred.read()
-            metrics = compare_molblocks(molblock_pred, molblock_gt)
-            mol_gt = Chem.MolFromMolBlock(molblock_gt, sanitize=False, removeHs=False, strictParsing=True)
-            atom_count = mol_gt.GetNumAtoms()
-            sgroups_gt = Chem.GetMolSubstanceGroups(mol_gt)
-            bracket_count = 0
-            for sgroup_gt in sgroups_gt:
-                bracket_count += len(sgroup_gt.GetBrackets())
+    if args.canonical_match:
+        gt_canonical = load_gt_canonical(args.gt_canonical_tsv)
+        valid_statuses = {
+            s.strip() for s in args.gt_status_valid.split(",") if s.strip()
+        }
+        print(f"Treating these GT statuses as valid: {sorted(valid_statuses)}")
+        api = api_from_args(args)
+        check_servers(api)
 
-            count = atom_count // 10 * 10
-            count = min(count, 50)
-            # count = bracket_count
-            if count in exact_matches:
-                exact_matches[count].append(metrics["exact_match"])
-                atom_precisions[count].append(metrics["atom_precision"])
-                atom_recalls[count].append(metrics["atom_recall"])
-                atom_f1s[count].append(metrics["atom_f1"])
-                bond_precisions[count].append(metrics["bond_precision"])
-                bond_recalls[count].append(metrics["bond_recall"])
-                bond_f1s[count].append(metrics["bond_f1"])
-                sgroup_precisions[count].append(metrics["sgroup_precision"])
-                sgroup_recalls[count].append(metrics["sgroup_recall"])
-                sgroup_f1s[count].append(metrics["sgroup_f1"])
+        if not args.no_pred_cache:
+            cache_path = args.pred_canonical_tsv or os.path.join(
+                pred_root_path, "canonical_bigsmiles.pred.tsv"
+            )
+            cache_rows = load_existing_rows(cache_path)
+            if cache_rows:
+                print(f"Reusing {len(cache_rows)} cached predictions")
+
+    for image_path in iter_filelist(args.test_filelist):
+        molfile_gt = gt_molfile_for_image(image_path)
+        molfile_pred = pred_molfile_for_image(image_path, pred_root_path)
+
+        with open(molfile_gt, "r") as f_gt:
+            molblock_gt = f_gt.read()
+        if not os.path.exists(molfile_pred):
+            raise FileNotFoundError(
+                f"No prediction at {molfile_pred}\n"
+                f"Run predict.py for this experiment first, e.g.\n"
+                f"    sh scripts/submit_predict.sh"
+            )
+        with open(molfile_pred, "r") as f_pred:
+            molblock_pred = f_pred.read()
+
+        metrics = compare_molblocks(molblock_pred, molblock_gt)
+        mol_gt = Chem.MolFromMolBlock(molblock_gt, sanitize=False, removeHs=False, strictParsing=True)
+        atom_count = mol_gt.GetNumHeavyAtoms()
+
+        count = atom_count // 10 * 10
+        count = min(count, 50)
+
+        if count not in exact_matches:
+            exact_matches[count] = []
+            atom_precisions[count] = []
+            atom_recalls[count] = []
+            atom_f1s[count] = []
+            bond_precisions[count] = []
+            bond_recalls[count] = []
+            bond_f1s[count] = []
+            sgroup_precisions[count] = []
+            sgroup_recalls[count] = []
+            sgroup_f1s[count] = []
+            canonical_matches[count] = []
+
+        exact_matches[count].append(metrics["exact_match"])
+        atom_precisions[count].append(metrics["atom_precision"])
+        atom_recalls[count].append(metrics["atom_recall"])
+        atom_f1s[count].append(metrics["atom_f1"])
+        bond_precisions[count].append(metrics["bond_precision"])
+        bond_recalls[count].append(metrics["bond_recall"])
+        bond_f1s[count].append(metrics["bond_f1"])
+        sgroup_precisions[count].append(metrics["sgroup_precision"])
+        sgroup_recalls[count].append(metrics["sgroup_recall"])
+        sgroup_f1s[count].append(metrics["sgroup_f1"])
+
+        if args.canonical_match:
+            gt_key = gt_tsv_key(image_path, args.data_root)
+            canonical_gt, gt_status = gt_canonical.get(gt_key, ("", ""))
+
+            if gt_status not in valid_statuses:
+                # No usable ground truth, so this can never match. Counted as
+                # a non-match rather than dropped, and never sent to the
+                # server. Tallied so the ceiling it imposes stays visible.
+                uncanonicalizable[gt_status or GT_MISSING] += 1
+                canonical_matches[count].append(0.0)
             else:
-                exact_matches[count] = [metrics["exact_match"]]
-                atom_precisions[count] = [metrics["atom_precision"]]
-                atom_recalls[count] = [metrics["atom_recall"]]
-                atom_f1s[count] = [metrics["atom_f1"]]
-                bond_precisions[count] = [metrics["bond_precision"]]
-                bond_recalls[count] = [metrics["bond_recall"]]
-                bond_f1s[count] = [metrics["bond_f1"]]
-                sgroup_precisions[count] = [metrics["sgroup_precision"]]
-                sgroup_recalls[count] = [metrics["sgroup_recall"]]
-                sgroup_f1s[count] = [metrics["sgroup_f1"]]
+                cached = cache_rows.get(image_path)
+                if cached:
+                    is_match = bool(cached["canonical_bigsmiles"]) and \
+                        cached["canonical_bigsmiles"] == \
+                        sanitize(canonical_gt).strip()
+                else:
+                    try:
+                        is_match, pred_bigsmiles, pred_canonical, pred_status \
+                            = score_canonical(
+                                api, molblock_pred, canonical_gt, gt_status,
+                                valid_statuses
+                            )
+                    except ServerUnavailableError as e:
+                        print(f"Canonical matching aborted: {e}")
+                        args.canonical_match = False
+                        server_aborted = True
+                        is_match = False
+                        pred_canonical = None
 
+                    if pred_canonical is not None and cache_path:
+                        cache_rows[image_path] = {
+                            "path": image_path,
+                            "bigsmiles": sanitize(pred_bigsmiles),
+                            "canonical_bigsmiles":
+                                sanitize(pred_canonical).strip(),
+                            "status": pred_status
+                        }
+                        write_rows(list(cache_rows.values()), cache_path)
 
-            print(f"molfile_gt: {molfile_gt}, metrics: {metrics}")
+                canonical_matches[count].append(float(is_match))
+
+        print(f"molfile_gt: {molfile_gt}, metrics: {metrics}")
 
     print(pred_root_path)
     for count in sorted(exact_matches.keys()):
-        # print(f"count: {count} - {count+19}, "
-        print(f"count: {count}, occurrences: {len(exact_matches[count])}, "
-              f"Exact matches: {np.mean(exact_matches[count]): .2f}, "
-              # f"AP: {np.mean(atom_precisions[count]): .4f}, "
-              # f"AR: {np.mean(atom_recalls[count]): .4f}, "
-              f"Atom F1: {np.mean(atom_f1s[count]): .4f}, "
-              # f"BP: {np.mean(bond_precisions[count]): .4f}, "
-              # f"BR: {np.mean(bond_recalls[count]): .4f}, "
-              f"Bond F1: {np.mean(bond_f1s[count]): .4f}, "
-              # f"SP: {np.mean(sgroup_precisions[count]): .4f}, "
-              # f"SR: {np.mean(sgroup_recalls[count]): .4f}, "
-              f"Sgroup F1: {np.mean(sgroup_f1s[count]): .4f}")
+        line = (
+            f"count: {count}, occurrences: {len(exact_matches[count])}, "
+            f"Exact matches: {np.mean(exact_matches[count]): .2f}, "
+            f"Atom F1: {np.mean(atom_f1s[count]): .4f}, "
+            f"Bond F1: {np.mean(bond_f1s[count]): .4f}, "
+            f"Sgroup F1: {np.mean(sgroup_f1s[count]): .4f}"
+        )
+        if canonical_matches.get(count):
+            line += f", Canon match: {np.mean(canonical_matches[count]): .4f}"
+        print(line)
+
+    if any(canonical_matches.values()):
+        overall = [m for ms in canonical_matches.values() for m in ms]
+        total_uncanonicalizable = sum(uncanonicalizable.values())
+        print(
+            f"Canonical match (all {len(overall)} samples): "
+            f"{np.mean(overall): .4f}"
+        )
+        print(
+            f"  of which {total_uncanonicalizable} have no usable ground-truth "
+            f"canonical and can never match, capping this at "
+            f"{1 - total_uncanonicalizable / len(overall): .4f}"
+        )
+        for status, n in sorted(uncanonicalizable.items()):
+            print(f"    {status}: {n}")
+
+    if server_aborted:
+        # The geometry report above is complete and correct; only the
+        # canonical metric is partial, so say so loudly rather than exit 0.
+        print(
+            "Canonical matching did not finish: a service went away. The "
+            "geometry metrics above are complete; rerun to finish the "
+            "canonical metric (cached results are reused)."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

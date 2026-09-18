@@ -1,13 +1,14 @@
 import argparse
 import traceback as tb
 import csv
-import glob
 import json
 import numpy as np
 import os
 from rdkit import Chem
 from SmilesPE.pretokenizer import atomwise_tokenizer
 from typing import Dict, List, Tuple
+
+from utilities.paths import gt_molfile_for_image, iter_filelist
 
 
 def get_args():
@@ -107,7 +108,7 @@ def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
 
 def _get_row(png_fn: str) -> Dict[str, str]:
     png_path = png_fn
-    mol_path = f"{png_fn[:-4]}.corrected.mol"
+    mol_path = gt_molfile_for_image(png_fn)
 
     assert os.path.exists(png_path), png_path
     assert os.path.exists(mol_path), mol_path
@@ -222,19 +223,7 @@ def aggregate_into_csv(args) -> None:
 
         ofn = os.path.join("experiments", args.expt_id, f"{args.expt_id}_{phase}.processed.csv")
 
-        rows = []
-        with open(fn, "r") as f:
-            for line in f:
-                if line.strip().endswith("/"):
-                    png_fl = sorted(glob.glob(f"{line.strip()}/*.png"))
-                    for png_fn in png_fl:
-                        row = _get_row(png_fn=png_fn)
-                        rows.append(row)
-                else:
-                    png_fn = line.strip()
-                    assert png_fn.endswith(".png"), png_fn
-                    row = _get_row(png_fn=png_fn)
-                    rows.append(row)
+        rows = [_get_row(png_fn=png_fn) for png_fn in iter_filelist(fn)]
 
         with open(ofn, "w") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)

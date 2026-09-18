@@ -59,6 +59,9 @@ def get_args():
     parser.add_argument('--data_path', type=str, default=None)
     parser.add_argument('--train_files', type=str, default=None)
     parser.add_argument('--val_file', type=str, default=None)
+    parser.add_argument('--val_limit', type=int, default=None,
+                        help='use only the first N validation rows; '
+                             'for smoke tests. Default: all rows.')
     parser.add_argument('--test_files', type=str, default=None)
     parser.add_argument('--coords_file', type=str, default=None)
     parser.add_argument('--vocab_file', type=str, default=None)
@@ -85,6 +88,12 @@ def get_args():
     parser.add_argument('--warmup_ratio', type=float, default=0)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--load_path', type=str, default=None)
+    parser.add_argument('--save_init_and_exit', action='store_true',
+                        help='save the model as loaded, before any training '
+                             'step, then exit. This is the cold-start '
+                             'baseline: pretrained weights mapped into the '
+                             'PolymerScribe architecture, with the widened '
+                             'heads still at their fresh initialization.')
     parser.add_argument('--load_encoder_only', action='store_true')
     parser.add_argument('--train_steps_per_epoch', type=int, default=-1)
     parser.add_argument('--save_path', type=str, default='output/')
@@ -484,6 +493,32 @@ def val_fn(
     return predictions, seq_acc_meter.avg
 
 
+def save_init(args, encoder, decoder, encoder_optimizer, encoder_scheduler,
+              decoder_optimizer, decoder_scheduler, save_path) -> None:
+    """Write the model as loaded, before training, in the usual format.
+
+    Saved as *_last.pth so predict.py and the submit scripts can consume it
+    exactly like a trained checkpoint.
+    """
+    os.makedirs(save_path, exist_ok=True)
+    save_obj = {
+        'encoder': encoder.state_dict(),
+        'encoder_optimizer': encoder_optimizer.state_dict(),
+        'encoder_scheduler': encoder_scheduler.state_dict(),
+        'decoder': decoder.state_dict(),
+        'decoder_optimizer': decoder_optimizer.state_dict(),
+        'decoder_scheduler': decoder_scheduler.state_dict(),
+        'global_step': 0,
+        'args': {
+            key: args.__dict__[key]
+            for key in ['formats', 'input_size', 'coord_bins', 'sep_xy']
+        }
+    }
+    path = os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth')
+    torch.save(save_obj, path)
+    log_rank_0(f'Saved the untrained (cold-start) model to {path}')
+
+
 def train_loop(
     args,
     train_df: pd.DataFrame,
@@ -539,6 +574,11 @@ def train_loop(
     encoder_optimizer, encoder_scheduler, decoder_optimizer, decoder_scheduler = \
         get_optimizer_and_scheduler(args, encoder, decoder, load_path=args.load_path)
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
+
+    if args.save_init_and_exit:
+        save_init(args, encoder, decoder, encoder_optimizer, encoder_scheduler,
+                  decoder_optimizer, decoder_scheduler, save_path)
+        return
 
     # ====================================================
     # loop
@@ -764,7 +804,9 @@ def get_data(args) -> Tuple[
         ])
         log_rank_0(f'train.shape: {train_df.shape}')
     if args.do_train or args.do_val:
-        val_df = pd.read_csv(args.val_file)[:5]
+        val_df = pd.read_csv(args.val_file)
+        if args.val_limit:
+            val_df = val_df[:args.val_limit]
         val_df.attrs['file'] = args.val_file
         log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:
