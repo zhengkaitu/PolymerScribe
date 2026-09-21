@@ -5,7 +5,12 @@ data/
 data_backup*
 ckpts/
 output/
-experiments/
+# Experiment splits are versioned artifacts: the train/val/test membership
+# is a pure function of (canonical_bigsmiles.tsv statuses, seed), so it is
+# NOT regenerable once the TSV is re-probed. Keep the filelists in git.
+experiments/**
+!experiments/full_rerun_*/
+!experiments/full_rerun_*/*.filelist.txt
 predictions/
 bigsmiles_analysis/
 notebook/
