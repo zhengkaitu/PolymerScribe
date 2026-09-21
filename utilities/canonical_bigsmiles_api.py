@@ -43,9 +43,93 @@ FIELDNAMES = ["path", "bigsmiles", "canonical_bigsmiles", "status"]
 # apart from "this particular input brought it down".
 PROBE_BIGSMILES = "CCO{[>][<]CCO[>][<]}CCO"
 
+# The element symbol every wildcard/R-group atom is rewritten to before a
+# molblock is sent to bigsmiles-server. See normalize_wildcard_atoms.
+#
+# Yttrium, of all things, because the constraint is brutally narrow:
+#
+#   * The canonicalization server parses BigSMILES with RDKit, so the atom has
+#     to be a *real element*. "R", "A", "E", "Q" and "Z" are MDL query-atom
+#     codes with no SMILES meaning -- [R] is a ring-count primitive, valid only
+#     in SMARTS -- and RDKit rejects all five. Measured on the corpus: an [R]
+#     in a BigSMILES failed canonicalization 95 times out of 95.
+#   * It must not be "*". In this corpus a "*" atom is an attachment point and
+#     comes back as a bonding descriptor ([$]/[<]/[>]), so using it for a
+#     substituent stub would rewrite the polymer topology.
+#   * Y has no default valence in RDKit (GetDefaultValence(39) == -1), so it
+#     adds no implicit hydrogens and perturbs nothing. At/Xe/Rn parse but carry
+#     real valences and gave asymmetric results when probed.
+#   * 3 ground-truth molfiles already use Y by hand as exactly this kind of
+#     placeholder (e.g. C#C[Y]C#C), and one of them canonicalizes today.
+WILDCARD_SYMBOL = "Y"
+
+# Element symbols in a V2000 atom block that already mean "wildcard".
+WILDCARD_INPUT_SYMBOLS = frozenset({"R", "R#"})
+
+# Columns 31-33 of a V2000 atom line hold the element symbol, left-justified.
+_SYMBOL_START = 31
+_SYMBOL_END = 34
+
 
 class ServerUnavailableError(RuntimeError):
     """Raised when a service stops answering and does not come back."""
+
+
+def normalize_wildcard_atoms(
+    molblock: str,
+    symbol: str = WILDCARD_SYMBOL
+) -> str:
+    """Give every wildcard/R-group atom the same element symbol.
+
+    The two sides of the benchmark draw an abbreviation differently and
+    bigsmiles-server keys off the element symbol while *ignoring* the alias
+    record, so the same molecule used to convert two different ways:
+
+        ground truth (ChemDraw)  carbon + "A" alias "CN"  ->  ...C...
+        prediction (MolScribe)   element R + same alias   ->  ...[R]...
+
+    and [R] never canonicalizes. Rewriting both to one real element makes the
+    conversion a function of the structure instead of the exporter.
+
+    An atom is a wildcard if it carries an alias record or its symbol already
+    says so. "*" atoms are deliberately left alone -- they are polymer
+    attachment points, not substituent stubs.
+
+    Returns the molblock unchanged when there is no V2000 counts line, so the
+    empty-string probe payload still round-trips.
+    """
+    lines = molblock.split("\n")
+
+    start = num_atoms = None
+    for i, line in enumerate(lines):
+        if line.rstrip().endswith("V2000"):
+            num_atoms = int(line[:3])
+            start = i + 1
+            break
+
+    if start is None:
+        return molblock
+
+    # "A  <idx>" on one line, the alias text on the next. Indices are 1-based.
+    aliased = set()
+    for line in lines:
+        head = line.split()
+        if len(head) == 2 and head[0] == "A" and head[1].isdigit():
+            aliased.add(int(head[1]))
+
+    for offset in range(num_atoms):
+        i = start + offset
+        if i >= len(lines):
+            break
+
+        current = lines[i][_SYMBOL_START:_SYMBOL_END].strip()
+        if (offset + 1) in aliased or current in WILDCARD_INPUT_SYMBOLS:
+            lines[i] = (
+                f"{lines[i][:_SYMBOL_START]}{symbol:<3}"
+                f"{lines[i][_SYMBOL_END:]}"
+            )
+
+    return "\n".join(lines)
 
 
 class CanonicalBigSMILESAPI:
@@ -58,7 +142,8 @@ class CanonicalBigSMILESAPI:
         timeout: int,
         retries: int,
         retry_wait: int,
-        payload_attempts: int
+        payload_attempts: int,
+        normalize_wildcards: bool = True
     ) -> None:
         self.bigsmiles_uri = \
             f"{bigsmiles_url}:{bigsmiles_port}/api/molblock-to-bigsmiles"
@@ -69,6 +154,7 @@ class CanonicalBigSMILESAPI:
         self.retries = retries
         self.retry_wait = retry_wait
         self.payload_attempts = payload_attempts
+        self.normalize_wildcards = normalize_wildcards
         self.bigsmiles_session = requests.Session()
         self.canonicalization_session = requests.Session()
         self.killer_inputs = []
@@ -150,7 +236,14 @@ class CanonicalBigSMILESAPI:
         Returns FAILED_BIGSMILES when the server reports failure or hands back
         an empty string, which it does (with success=true) for input it cannot
         parse.
+
+        This is the one place in the repo that sends a molblock anywhere, so
+        it is also where wildcard normalization happens -- ground truth and
+        predictions cannot diverge if they are normalized here.
         """
+        if self.normalize_wildcards:
+            molblock = normalize_wildcard_atoms(molblock)
+
         resp = self._post(
             self.bigsmiles_session,
             self.bigsmiles_uri,
@@ -235,6 +328,10 @@ def add_server_args(parser) -> None:
     parser.add_argument("--payload_attempts", type=int, default=2,
                         help="times to send one input before blaming it for a "
                              "service crash")
+    parser.add_argument("--no_wildcard_normalization", action="store_true",
+                        help="send molblocks verbatim instead of rewriting "
+                             "wildcard/R-group atoms to a common element; "
+                             "reproduces the pre-normalization numbers")
 
 
 def api_from_args(args) -> CanonicalBigSMILESAPI:
@@ -247,7 +344,10 @@ def api_from_args(args) -> CanonicalBigSMILESAPI:
         timeout=args.timeout,
         retries=args.retries,
         retry_wait=args.retry_wait,
-        payload_attempts=args.payload_attempts
+        payload_attempts=args.payload_attempts,
+        normalize_wildcards=not getattr(
+            args, "no_wildcard_normalization", False
+        )
     )
 
 

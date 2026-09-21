@@ -49,6 +49,23 @@ def status_from_existing(row: dict) -> str:
 
 
 def main(args):
+    # The split is a pure function of this file's statuses, so a half-finished
+    # run must not be able to leave a truncated TSV in its place. Everything
+    # is written to a sibling .partial and promoted only once the run
+    # completes; --resume reads the .partial back.
+    final_file = args.output_file
+    partial_file = f"{final_file}.partial"
+    if os.path.exists(final_file) and not (
+        args.resume or args.reclassify or args.overwrite
+    ):
+        print(
+            f"{final_file} already exists. Pass --overwrite to replace it, "
+            f"--resume to continue it, or --output_file to write elsewhere."
+        )
+        sys.exit(1)
+
+    args.output_file = partial_file
+
     api = api_from_args(args)
     check_servers(api)
 
@@ -56,12 +73,13 @@ def main(args):
     mol_files = sorted(glob.glob(pattern, recursive=True))
     print(f"Found {len(mol_files)} *.corrected.mol files under {args.data_dir}")
 
-    done = load_existing_rows(args.output_file) \
+    resume_from = partial_file if os.path.exists(partial_file) else final_file
+    done = load_existing_rows(resume_from) \
         if (args.resume or args.reclassify) else {}
     if done:
-        print(f"Read {len(done)} existing rows from {args.output_file}")
+        print(f"Read {len(done)} existing rows from {resume_from}")
     elif args.reclassify:
-        print(f"--reclassify needs an existing {args.output_file}")
+        print(f"--reclassify needs an existing {resume_from}")
         sys.exit(1)
 
     rows = []
@@ -138,8 +156,18 @@ def main(args):
 
     write_rows(rows, args.output_file)
 
+    if aborted:
+        print(
+            f"Run was incomplete ({len(rows)}/{len(mol_files)} files). "
+            f"{final_file} was left untouched; progress is in {partial_file}. "
+            f"Restart the server, then rerun with --resume to continue."
+        )
+        sys.exit(1)
+
+    os.replace(partial_file, final_file)
+
     counts = Counter(row["status"] or "UNKNOWN" for row in rows)
-    print(f"Wrote {len(rows)} rows to {args.output_file}")
+    print(f"Wrote {len(rows)} rows to {final_file}")
     for status, count in sorted(counts.items()):
         print(f"  {status}: {count}")
     if reclassified:
@@ -149,12 +177,6 @@ def main(args):
             f"{len(api.killer_inputs)} input(s) crashed a service and were "
             f"recorded as failures"
         )
-    if aborted:
-        print(
-            f"Run was incomplete ({len(rows)}/{len(mol_files)} files). "
-            f"Restart the server, then rerun with --resume to continue."
-        )
-        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -166,6 +188,12 @@ if __name__ == "__main__":
                         default="./data/PolymerLit/canonical_bigsmiles.tsv")
     parser.add_argument("--resume", action="store_true",
                         help="reuse rows already present in --output_file")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="allow replacing an existing --output_file; "
+                             "without it an existing file is left alone, "
+                             "because the train/val/test split is a function "
+                             "of this file and is not regenerable once it "
+                             "changes")
     parser.add_argument("--reclassify", action="store_true",
                         help="re-probe only the rows whose canonical equals "
                              "its input, to tell a genuine failure apart from "
