@@ -516,6 +516,8 @@ def save_init(args, encoder, decoder, encoder_optimizer, encoder_scheduler,
     }
     path = os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth')
     torch.save(save_obj, path)
+    path = os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth')
+    torch.save(save_obj, path)
     log_rank_0(f'Saved the untrained (cold-start) model to {path}')
 
 
