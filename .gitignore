@@ -3,6 +3,8 @@
 .idea/
 data/
 data_backup*
+# Snapshots of logs/predictions/experiments taken before a rerun.
+backup_*/
 ckpts/
 output/
 # Experiment splits are versioned artifacts: the train/val/test membership
