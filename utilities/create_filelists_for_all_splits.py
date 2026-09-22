@@ -18,6 +18,23 @@ that predictions can be scored on canonical BigSMILES. Everything else stays in
 train, where it is still useful: every png/mol pair was manually corrected.
 The ladder family is exempt -- essentially no ladder structure canonicalizes,
 so filtering it would empty the ladder holdout entirely.
+
+The test set is *stratified by molecule size* (see TEST_BUCKET_QUOTA). Drawn
+uniformly at random it followed the corpus, which put only ~13 of 100 test
+images above 40 atoms -- too few to resolve anything, and the sweep's whole
+question is how accuracy scales with size. Stratifying trades precision in the
+crowded small buckets, which had a surplus, for precision in the large ones,
+which had almost none.
+
+Only test is stratified. Val is drawn at random from what is left, because it
+selects checkpoints rather than being reported per bucket, and balancing it
+would consume scarce large molecules twice over.
+
+Note that a stratified test set is no longer a simple random sample of the
+corpus: large molecules are deliberately over-represented (~30% of test
+against ~5.5% of the pool), so the unweighted overall metric reads a few
+points below the corpus rate and is not comparable to a number from an
+unstratified split. The per-bucket columns are what this split is for.
 """
 import argparse
 import csv
@@ -25,14 +42,24 @@ import glob
 import os
 import random
 
+from collections import Counter
+
+from utilities.binning import bucket_of_image, buckets
 from utilities.canonical_bigsmiles_api import VALID_STATUSES
 from utilities.paths import gt_tsv_key, normalize_image_path, stem_path
 
 
 GENERIC_VAL = 95
-GENERIC_TEST = 95
 LADDER_VAL = 5
 LADDER_TEST = 5
+
+# Test images per size bucket, over generic *and* ladder together. The ladder
+# holdout is drawn first and counts against these, so the totals hold and the
+# ladder images still appear in whichever buckets they fall in.
+TEST_BUCKET_QUOTA = {0: 20, 10: 20, 20: 15, 30: 15, 40: 15, 50: 15}
+
+TEST_TOTAL = sum(TEST_BUCKET_QUOTA.values())
+GENERIC_TEST = TEST_TOTAL - LADDER_TEST
 
 
 def verify_labels(sources: list[str]) -> None:
@@ -73,8 +100,14 @@ def collect_images(sources: list[str]) -> list[str]:
     return [normalize_image_path(fn) for fn in images]
 
 
-def split_generic(images: list[str], valid_keys: set[str], data_root: str):
-    """Split the generic pool, drawing val/test from valid images only."""
+def split_generic(images: list[str], valid_keys: set[str], data_root: str,
+                  ladder_test: list[str]):
+    """Split the generic pool, drawing val/test from valid images only.
+
+    Test is filled per size bucket to TEST_BUCKET_QUOTA, minus whatever the
+    ladder holdout already contributes to each bucket. Val is then drawn at
+    random from everything still unused.
+    """
     valid = [
         fn for fn in images if gt_tsv_key(fn, data_root) in valid_keys
     ]
@@ -86,16 +119,53 @@ def split_generic(images: list[str], valid_keys: set[str], data_root: str):
         f"{len(invalid)} without (all of which go to train)"
     )
 
-    needed = GENERIC_VAL + GENERIC_TEST
-    assert len(valid) >= needed, (
-        f"Only {len(valid)} generic images have a valid canonical, "
-        f"need {needed} for val+test"
+    # The ladder holdout is already chosen, so it eats into the quota. Quotas
+    # are far larger than LADDER_TEST, so no bucket can be overdrawn -- but
+    # assert it rather than silently taking a negative slice.
+    ladder_per_bucket = Counter(bucket_of_image(fn) for fn in ladder_test)
+    remaining = {}
+    for bucket in buckets():
+        want = TEST_BUCKET_QUOTA[bucket] - ladder_per_bucket[bucket]
+        assert want >= 0, (
+            f"bucket {bucket}: ladder contributed "
+            f"{ladder_per_bucket[bucket]} test images but the quota is only "
+            f"{TEST_BUCKET_QUOTA[bucket]}"
+        )
+        remaining[bucket] = want
+
+    by_bucket = {bucket: [] for bucket in buckets()}
+    for fn in valid:
+        by_bucket[bucket_of_image(fn)].append(fn)
+
+    test = []
+    for bucket in buckets():
+        pool = by_bucket[bucket]
+        want = remaining[bucket]
+        assert len(pool) >= want, (
+            f"bucket {bucket}: only {len(pool)} generic images have a valid "
+            f"canonical, need {want} for test"
+        )
+        random.shuffle(pool)
+        test.extend(pool[:want])
+        by_bucket[bucket] = pool[want:]
+
+    print(
+        "Test buckets (generic + ladder): "
+        + ", ".join(
+            f"{bucket}: {remaining[bucket]}+{ladder_per_bucket[bucket]}"
+            for bucket in buckets()
+        )
     )
 
-    random.shuffle(valid)
-    val = valid[:GENERIC_VAL]
-    test = valid[GENERIC_VAL:needed]
-    train = valid[needed:] + invalid
+    # Whatever the quotas did not take, pooled back together for val/train.
+    rest = [fn for bucket in buckets() for fn in by_bucket[bucket]]
+    assert len(rest) >= GENERIC_VAL, (
+        f"Only {len(rest)} valid generic images left after the test draw, "
+        f"need {GENERIC_VAL} for val"
+    )
+    random.shuffle(rest)
+    val = rest[:GENERIC_VAL]
+    train = rest[GENERIC_VAL:] + invalid
 
     return train, val, test
 
@@ -117,17 +187,20 @@ def get_filelist_fully_random(
     data_root: str
 ):
     """Image-level random split: images from one document may straddle sets."""
-    generic_train, generic_val, generic_test = split_generic(
-        collect_images(sources_generic), valid_keys, data_root
-    )
+    # Ladder first: it is drawn at random and unfiltered, and the generic test
+    # draw fills the size buckets around whatever it happened to take.
     ladder_train, ladder_val, ladder_test = split_ladder(
         collect_images(sources_ladder)
+    )
+    generic_train, generic_val, generic_test = split_generic(
+        collect_images(sources_generic), valid_keys, data_root, ladder_test
     )
 
     assert len(generic_val) == GENERIC_VAL
     assert len(generic_test) == GENERIC_TEST
     assert len(ladder_val) == LADDER_VAL
     assert len(ladder_test) == LADDER_TEST
+    assert len(generic_test) + len(ladder_test) == TEST_TOTAL
 
     filelist_train_realistic = generic_train + ladder_train
     filelist_val = generic_val + ladder_val

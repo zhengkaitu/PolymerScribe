@@ -8,6 +8,7 @@ from rdkit import Chem
 from scipy.optimize import linear_sum_assignment
 from typing import Any
 
+from utilities.binning import bucket_of_molblock
 from utilities.canonical_bigsmiles_api import (
     FAILED_BIGSMILES,
     FIELDNAMES,
@@ -502,11 +503,10 @@ def main(args):
             molblock_pred = f_pred.read()
 
         metrics = compare_molblocks(molblock_pred, molblock_gt)
-        mol_gt = Chem.MolFromMolBlock(molblock_gt, sanitize=False, removeHs=False, strictParsing=True)
-        atom_count = mol_gt.GetNumHeavyAtoms()
-
-        count = atom_count // 10 * 10
-        count = min(count, 50)
+        # Same bucketing the test split was stratified on, so the per-bucket
+        # occurrence counts come out as the split intended.
+        count = bucket_of_molblock(molblock_gt)
+        assert count is not None, f"RDKit could not read {molfile_gt}"
 
         if count not in exact_matches:
             exact_matches[count] = []
