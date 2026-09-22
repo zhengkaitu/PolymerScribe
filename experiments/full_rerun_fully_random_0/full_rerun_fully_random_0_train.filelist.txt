@@ -1,7 +1,0 @@
-data/PolymerLit/PolymerLit-MT_processed/
-data/PolymerLit/PolymerLit-Olsen_processed/bigsmiles_manuscript/
-data/PolymerLit/PolymerLit-Olsen_processed/bigsmiles_si/
-data/PolymerLit/PolymerLit-Olsen_processed/canonicalization_manuscript/
-data/PolymerLit/PolymerLit-Olsen_processed/canonicalization_si/
-data/PolymerLit/PolymerLit-Olsen_processed/non-covalent_manuscript/
-data/PolymerLit/PolymerLit-Olsen_processed/non-covalent_si/
