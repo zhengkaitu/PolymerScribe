@@ -66,6 +66,11 @@ WILDCARD_SYMBOL = "Y"
 # Element symbols in a V2000 atom block that already mean "wildcard".
 WILDCARD_INPUT_SYMBOLS = frozenset({"R", "R#"})
 
+# A polymer attachment point, which must stay one on both sides. It is NOT a
+# wildcard: bigsmiles-server turns it into a bonding descriptor, and turning
+# it into a substituent stub would rewrite the topology.
+ATTACHMENT_SYMBOL = "*"
+
 # Columns 31-33 of a V2000 atom line hold the element symbol, left-justified.
 _SYMBOL_START = 31
 _SYMBOL_END = 34
@@ -92,8 +97,12 @@ def normalize_wildcard_atoms(
     conversion a function of the structure instead of the exporter.
 
     An atom is a wildcard if it carries an alias record or its symbol already
-    says so. "*" atoms are deliberately left alone -- they are polymer
-    attachment points, not substituent stubs.
+    says so -- except an atom whose alias text is "*", which is a polymer
+    attachment point and is normalized back to "*" rather than to the
+    wildcard. Attachment points become bonding descriptors, not substituent
+    stubs, and the two exporters disagree about them too: the ground truth
+    writes element "*", while a prediction arrives as element "R" aliased
+    "*" because RDKit writes every dummy atom as "R".
 
     Returns the molblock unchanged when there is no V2000 counts line, so the
     empty-string probe payload still round-trips.
@@ -111,11 +120,12 @@ def normalize_wildcard_atoms(
         return molblock
 
     # "A  <idx>" on one line, the alias text on the next. Indices are 1-based.
-    aliased = set()
-    for line in lines:
+    aliases = {}
+    for i, line in enumerate(lines):
         head = line.split()
         if len(head) == 2 and head[0] == "A" and head[1].isdigit():
-            aliased.add(int(head[1]))
+            text = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            aliases[int(head[1])] = text
 
     for offset in range(num_atoms):
         i = start + offset
@@ -123,11 +133,25 @@ def normalize_wildcard_atoms(
             break
 
         current = lines[i][_SYMBOL_START:_SYMBOL_END].strip()
-        if (offset + 1) in aliased or current in WILDCARD_INPUT_SYMBOLS:
-            lines[i] = (
-                f"{lines[i][:_SYMBOL_START]}{symbol:<3}"
-                f"{lines[i][_SYMBOL_END:]}"
-            )
+        alias = aliases.get(offset + 1)
+
+        if alias == ATTACHMENT_SYMBOL:
+            # MolScribe builds an attachment point as a dummy atom aliased
+            # "*", and RDKit writes any dummy atom's element as "R" -- so a
+            # predicted attachment point arrives looking exactly like an
+            # R-group and used to be rewritten to the wildcard, while the
+            # ground truth's plain "*" was left alone. Putting "*" back in
+            # the element column is what makes the two sides agree.
+            replacement = ATTACHMENT_SYMBOL
+        elif alias is not None or current in WILDCARD_INPUT_SYMBOLS:
+            replacement = symbol
+        else:
+            continue
+
+        lines[i] = (
+            f"{lines[i][:_SYMBOL_START]}{replacement:<3}"
+            f"{lines[i][_SYMBOL_END:]}"
+        )
 
     return "\n".join(lines)
 
