@@ -106,6 +106,29 @@ def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
     return edges
 
 
+def _dummy_label(atom, props: dict) -> str:
+    """The R-group label of an unaliased query atom, or "" if there is none.
+
+    A hand-drawn R-group is written by ChemDraw as element "R" in the V2000
+    atom block with no "A" alias record, so the element column is the only
+    place its identity lives. RDKit reads it as a dummy atom and keeps the
+    label in "dummyLabel" -- but SMILES has no way to spell "R", so
+    MolToSmiles flattens it to a bare "*", the same token a polymer
+    attachment point gets. The two are different symbols here, and the target
+    sequence has to keep them apart, so the label is recovered from
+    dummyLabel and the caller brackets it into "[R]".
+
+    An attachment point is left alone: a molfile "*" parses with no
+    dummyLabel at all (it carries molFileValue instead), so "*" stays "*".
+    """
+    if atom.GetAtomicNum() != 0:
+        return ""
+
+    label = props.get("dummyLabel") or ""
+
+    return "" if label == "*" else label
+
+
 def _get_row(png_fn: str) -> Dict[str, str]:
     png_path = png_fn
     mol_path = gt_molfile_for_image(png_fn)
@@ -134,7 +157,10 @@ def _get_row(png_fn: str) -> Dict[str, str]:
     smi = raw_smi
     superatoms = {}
     for atom_idx, atom in enumerate(mol.GetAtoms()):
-        alias = atom.GetPropsAsDict().get("molFileAlias")
+        props = atom.GetPropsAsDict()
+        alias = props.get("molFileAlias")
+        if not alias:
+            alias = _dummy_label(atom, props)
         if alias:
             superatoms[inverse_map[atom_idx]] = alias
 
