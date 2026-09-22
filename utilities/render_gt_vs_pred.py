@@ -61,8 +61,13 @@ RDLogger.DisableLog("rdApp.*")
 # Grouping by failure mode. A prediction that gets every atom and bond right
 # and still misses exact_match failed on S-groups alone -- a different problem
 # from a misread skeleton, and the aggregate metrics do not distinguish them.
+# The S-group case splits again: reading the subscript text inside the bracket
+# is OCR and fails on its own, so `sgroup_label` collects the samples whose
+# only defect is that string, leaving `sgroup_geometry` for the ones where the
+# brackets themselves are wrong.
 GROUP_EXACT = "exact"
-GROUP_SGROUP_ONLY = "sgroup_only"
+GROUP_SGROUP_LABEL = "sgroup_label"
+GROUP_SGROUP_GEOMETRY = "sgroup_geometry"
 GROUP_SKELETON = "skeleton_error"
 GROUP_UNPARSEABLE = "unparseable"
 
@@ -194,7 +199,14 @@ def classify(metrics: dict) -> str:
     if metrics["atom_f1"] == 0.0 and metrics["bond_f1"] == 0.0:
         return GROUP_UNPARSEABLE
     if metrics["atom_f1"] == 1.0 and metrics["bond_f1"] == 1.0:
-        return GROUP_SGROUP_ONLY
+        # exact_match_nolabel forgives the subscript text and nothing else, so
+        # it is exactly the test for "only the label is wrong". Absent from a
+        # prediction scored before that metric existed; those fall through to
+        # the geometry bucket, as they did before the split.
+        if metrics.get("exact_match_nolabel"):
+            return GROUP_SGROUP_LABEL
+
+        return GROUP_SGROUP_GEOMETRY
 
     return GROUP_SKELETON
 

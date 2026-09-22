@@ -184,7 +184,17 @@ def _get_bracket_cost(bracket_coords_pred, bracket_coords_gt) -> float:
     return bracket_cost
 
 
-def _sgroup_equal(sgroup_pred, sgroup_gt) -> bool:
+def _sgroup_equal(sgroup_pred, sgroup_gt, compare_label: bool = True) -> bool:
+    """Whether two already-bracket-matched S-groups agree.
+
+    `compare_label=False` ignores the subscript text -- the repeat-unit label
+    inside the bracket -- and compares only the connectivity. That separates
+    reading the chemistry (where the brackets go, how they connect) from
+    reading the little italic string, which is OCR and fails independently:
+    `8/9` comes back as `819`, `80` as `8BU`. Since sgroup_f1 is binary per
+    S-group and exact_match needs it at 1.0, one wrong character zeroes a
+    sample whose atoms, bonds and brackets are all correct.
+    """
     properties_pred = sgroup_pred.GetPropsAsDict()
     properties_gt = sgroup_gt.GetPropsAsDict()
     SCN_pred = properties_pred.get("CONNECT", "HT")
@@ -194,7 +204,7 @@ def _sgroup_equal(sgroup_pred, sgroup_gt) -> bool:
 
     if not str(SCN_pred).lower() == str(SCN_gt).lower():
         return False
-    if not str(SMT_pred).lower() == str(SMT_gt).lower():
+    if compare_label and not str(SMT_pred).lower() == str(SMT_gt).lower():
         return False
 
     return True
@@ -219,7 +229,9 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
             "sgroup_precision": 0.0,
             "sgroup_recall": 0.0,
             "sgroup_f1": 0.0,
-            "exact_match": 0.0
+            "sgroup_f1_nolabel": 0.0,
+            "exact_match": 0.0,
+            "exact_match_nolabel": 0.0
         }
         return metrics
 
@@ -349,23 +361,49 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
 
     sgroup_precisions = np.zeros(n_sgroup_pred, dtype=np.float32)
     sgroup_recalls = np.zeros(n_sgroup_gt, dtype=np.float32)
+    # The same score with the subscript text ignored. Scored off the same
+    # assignment and the same bracket-cost threshold -- the matching above is
+    # purely geometric -- so the gap between the two is attributable to the
+    # label text and nothing else.
+    sgroup_precisions_nolabel = np.zeros(n_sgroup_pred, dtype=np.float32)
+    sgroup_recalls_nolabel = np.zeros(n_sgroup_gt, dtype=np.float32)
     for r, c in zip(row_ind, col_ind):
         sgroup_pred = sgroups_pred[int(r)]
         sgroup_gt = sgroups_gt[int(c)]
         sgroup_cost = sgroup_costs[int(r), int(c)]
 
-        if _sgroup_equal(sgroup_pred, sgroup_gt) and sgroup_cost < sgroup_cost_threshold:
+        if sgroup_cost >= sgroup_cost_threshold:
+            continue
+
+        if _sgroup_equal(sgroup_pred, sgroup_gt):
             sgroup_precisions[int(r)] = 1.0
             sgroup_recalls[int(c)] = 1.0
 
-    sgroup_precision = np.mean(sgroup_precisions) if sgroup_precisions.size else 0.0
-    sgroup_recall = np.mean(sgroup_recalls) if sgroup_recalls.size else 0.0
-    if sgroup_precision == 0.0 and sgroup_recall == 0.0:
-        sgroup_f1 = 0.0
-    else:
-        sgroup_f1 = 2 * sgroup_precision * sgroup_recall / (sgroup_precision + sgroup_recall)
+        if _sgroup_equal(sgroup_pred, sgroup_gt, compare_label=False):
+            sgroup_precisions_nolabel[int(r)] = 1.0
+            sgroup_recalls_nolabel[int(c)] = 1.0
+
+    def _f1(precisions, recalls):
+        precision = np.mean(precisions) if precisions.size else 0.0
+        recall = np.mean(recalls) if recalls.size else 0.0
+        if precision == 0.0 and recall == 0.0:
+            return precision, recall, 0.0
+
+        return precision, recall, 2 * precision * recall / (precision + recall)
+
+    sgroup_precision, sgroup_recall, sgroup_f1 = _f1(
+        sgroup_precisions, sgroup_recalls
+    )
+    _, _, sgroup_f1_nolabel = _f1(
+        sgroup_precisions_nolabel, sgroup_recalls_nolabel
+    )
 
     exact_match = (atom_f1 == 1.0) and (bond_f1 == 1.0) and (sgroup_f1 == 1.0)
+    # A strict relaxation of exact_match: same atoms, same bonds, same
+    # brackets, only the subscript text forgiven.
+    exact_match_nolabel = (
+        (atom_f1 == 1.0) and (bond_f1 == 1.0) and (sgroup_f1_nolabel == 1.0)
+    )
 
     metrics = {
         "atom_precision": atom_precision,
@@ -377,7 +415,9 @@ def compare_molblocks(molblock_pred: str, molblock_gt: str) -> dict[str, Any]:
         "sgroup_precision": sgroup_precision,
         "sgroup_recall": sgroup_recall,
         "sgroup_f1": sgroup_f1,
-        "exact_match": exact_match
+        "sgroup_f1_nolabel": sgroup_f1_nolabel,
+        "exact_match": exact_match,
+        "exact_match_nolabel": exact_match_nolabel
     }
 
     return metrics
@@ -458,6 +498,8 @@ def main(args):
     sgroup_precisions = {}
     sgroup_recalls = {}
     sgroup_f1s = {}
+    sgroup_f1s_nolabel = {}
+    exact_matches_nolabel = {}
     canonical_matches = {}
 
     api = None
@@ -519,6 +561,8 @@ def main(args):
             sgroup_precisions[count] = []
             sgroup_recalls[count] = []
             sgroup_f1s[count] = []
+            sgroup_f1s_nolabel[count] = []
+            exact_matches_nolabel[count] = []
             canonical_matches[count] = []
 
         exact_matches[count].append(metrics["exact_match"])
@@ -531,6 +575,8 @@ def main(args):
         sgroup_precisions[count].append(metrics["sgroup_precision"])
         sgroup_recalls[count].append(metrics["sgroup_recall"])
         sgroup_f1s[count].append(metrics["sgroup_f1"])
+        sgroup_f1s_nolabel[count].append(metrics["sgroup_f1_nolabel"])
+        exact_matches_nolabel[count].append(metrics["exact_match_nolabel"])
 
         if args.canonical_match:
             gt_key = gt_tsv_key(image_path, args.data_root)
@@ -583,7 +629,9 @@ def main(args):
             f"Exact matches: {np.mean(exact_matches[count]): .2f}, "
             f"Atom F1: {np.mean(atom_f1s[count]): .4f}, "
             f"Bond F1: {np.mean(bond_f1s[count]): .4f}, "
-            f"Sgroup F1: {np.mean(sgroup_f1s[count]): .4f}"
+            f"Sgroup F1: {np.mean(sgroup_f1s[count]): .4f}, "
+            f"Sgroup F1 nolabel: {np.mean(sgroup_f1s_nolabel[count]): .4f}, "
+            f"Exact nolabel: {np.mean(exact_matches_nolabel[count]): .2f}"
         )
         if canonical_matches.get(count):
             line += f", Canon match: {np.mean(canonical_matches[count]): .4f}"
