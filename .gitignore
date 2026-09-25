@@ -19,6 +19,8 @@ notebook/
 unused*
 scripts/archives/
 figures/
+# Publication-only: draws the manuscript figures, not part of the release.
+utilities/plot_metrics.py
 README_extended.md
 visualization*
 logs/
