@@ -20,6 +20,7 @@ import requests
 import sys
 import time
 import traceback as tb
+from typing import Optional
 from tqdm import tqdm
 
 
@@ -335,6 +336,28 @@ class CanonicalBigSMILESAPI:
     def canonicalize(self, bigsmiles: str) -> str:
         """Canonicalize a BigSMILES, keeping only the string."""
         return self.canonicalize_with_status(bigsmiles)[0]
+
+    def canonicalization_response(self, bigsmiles: str) -> Optional[dict]:
+        """The canonicalization server's whole reply, error text included.
+
+        canonicalize_with_status keeps only the verdict; this is for callers
+        that need to know *why* an input failed. Returns None when there was
+        no reply to read -- the input timed out, or crashed the service.
+        """
+        resp = self._post(
+            self.canonicalization_session,
+            self.canonicalization_uri,
+            {"bigsmiles": bigsmiles},
+            "canonicalization-server"
+        )
+        if resp is None:
+            return None
+
+        try:
+            return resp.json()
+        except Exception:
+            return {"status": STATUS_FAIL,
+                    "error": f"HTTP {resp.status_code}: {resp.text}"}
 
 
 def add_server_args(parser) -> None:
