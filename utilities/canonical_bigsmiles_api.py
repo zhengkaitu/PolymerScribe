@@ -157,6 +157,83 @@ def normalize_wildcard_atoms(
     return "\n".join(lines)
 
 
+def fill_missing_crossing_bonds(molblock: str) -> str:
+    """Add an "M  SBL" line to every S-group that has atoms but none.
+
+    bigsmiles-server places bonding descriptors on an S-group's crossing
+    bonds, and its V2000 reader takes those only from SBL -- with no SBL the
+    list is empty and the conversion fails. Its V3000 reader, given no XBONDS,
+    instead derives them as the bonds with exactly one end in the S-group;
+    this does the same for V2000, so the two formats convert alike.
+
+    It matters for the 12 MT ground truths drawn as Indigo V3000 without
+    XBONDS: written back out as V2000 they had no SBL, and all 12 failed.
+    Predictions always carry SBL and pass through unchanged.
+
+    Returns the molblock unchanged when there is no V2000 counts line.
+    """
+    lines = molblock.split("\n")
+
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip().endswith("V2000"):
+            num_atoms = int(line[:3])
+            num_bonds = int(line[3:6])
+            start = i + 1
+            break
+
+    if start is None:
+        return molblock
+
+    # Fixed columns, not split(): two 3-wide atom indices run together once
+    # one reaches 100 (" 99100").
+    bonds = []
+    for line in lines[start + num_atoms:start + num_atoms + num_bonds]:
+        bonds.append((int(line[0:3]), int(line[3:6])))
+
+    # "M  SAL sssn15 aaa ...": S-group index, count, then 4-wide atom indices.
+    sgroup_atoms = {}
+    has_sbl = set()
+    end = None
+    for i, line in enumerate(lines):
+        if line.startswith("M  SAL"):
+            sgroup = int(line[6:10])
+            count = int(line[10:13])
+            atoms = [int(line[13 + 4 * k:17 + 4 * k]) for k in range(count)]
+            sgroup_atoms.setdefault(sgroup, set()).update(atoms)
+        elif line.startswith("M  SBL"):
+            has_sbl.add(int(line[6:10]))
+        elif line.startswith("M  END"):
+            end = i
+            break
+
+    if end is None:
+        return molblock
+
+    added = []
+    for sgroup, atoms in sorted(sgroup_atoms.items()):
+        if sgroup in has_sbl:
+            continue
+
+        crossing = [
+            index for index, (a, b) in enumerate(bonds, start=1)
+            if (a in atoms) != (b in atoms)
+        ]
+        # At most 15 entries per line. The server keeps only the last SBL line
+        # of an S-group, so more than 15 crossing bonds would still lose some.
+        for k in range(0, len(crossing), 15):
+            chunk = crossing[k:k + 15]
+            added.append(
+                f"M  SBL{sgroup:>4}{len(chunk):>3}"
+                + "".join(f"{index:>4}" for index in chunk)
+            )
+
+    if not added:
+        return molblock
+
+    return "\n".join(lines[:end] + added + lines[end:])
+
+
 class CanonicalBigSMILESAPI:
     def __init__(
         self,
@@ -168,7 +245,8 @@ class CanonicalBigSMILESAPI:
         retries: int,
         retry_wait: int,
         payload_attempts: int,
-        normalize_wildcards: bool = True
+        normalize_wildcards: bool = True,
+        fill_crossing_bonds: bool = True
     ) -> None:
         self.bigsmiles_uri = \
             f"{bigsmiles_url}:{bigsmiles_port}/api/molblock-to-bigsmiles"
@@ -180,6 +258,7 @@ class CanonicalBigSMILESAPI:
         self.retry_wait = retry_wait
         self.payload_attempts = payload_attempts
         self.normalize_wildcards = normalize_wildcards
+        self.fill_crossing_bonds = fill_crossing_bonds
         self.bigsmiles_session = requests.Session()
         self.canonicalization_session = requests.Session()
         self.killer_inputs = []
@@ -263,11 +342,14 @@ class CanonicalBigSMILESAPI:
         parse.
 
         This is the one place in the repo that sends a molblock anywhere, so
-        it is also where wildcard normalization happens -- ground truth and
-        predictions cannot diverge if they are normalized here.
+        it is also where wildcard normalization and crossing-bond filling
+        happen -- ground truth and predictions cannot diverge if they are
+        prepared here.
         """
         if self.normalize_wildcards:
             molblock = normalize_wildcard_atoms(molblock)
+        if self.fill_crossing_bonds:
+            molblock = fill_missing_crossing_bonds(molblock)
 
         resp = self._post(
             self.bigsmiles_session,
@@ -379,6 +461,10 @@ def add_server_args(parser) -> None:
                         help="send molblocks verbatim instead of rewriting "
                              "wildcard/R-group atoms to a common element; "
                              "reproduces the pre-normalization numbers")
+    parser.add_argument("--no_crossing_bond_fill", action="store_true",
+                        help="send S-groups without SBL lines as they are "
+                             "instead of deriving their crossing bonds; "
+                             "reproduces the pre-fill numbers")
 
 
 def api_from_args(args) -> CanonicalBigSMILESAPI:
@@ -394,6 +480,9 @@ def api_from_args(args) -> CanonicalBigSMILESAPI:
         payload_attempts=args.payload_attempts,
         normalize_wildcards=not getattr(
             args, "no_wildcard_normalization", False
+        ),
+        fill_crossing_bonds=not getattr(
+            args, "no_crossing_bond_fill", False
         )
     )
 

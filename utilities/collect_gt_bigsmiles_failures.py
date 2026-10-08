@@ -47,6 +47,7 @@ from utilities.canonical_bigsmiles_api import (
     ServerUnavailableError,
     add_server_args,
     api_from_args,
+    fill_missing_crossing_bonds,
     load_existing_rows,
 )
 from utilities.paths import GT_SUFFIX, IMAGE_SUFFIX
@@ -68,12 +69,16 @@ CONVERSION_CATEGORIES = [
      "points at a nonexistent atom. Every ground truth this large fails, and "
      "all of them convert once bond lines are read by column."),
     ("sru_without_crossing_bonds",
-     "An SRU bracket lists no crossing bonds (no `M  SBL` line), so the "
-     "converter cannot tell where the repeat unit connects. No convertible "
-     "ground truth lacks it."),
+     "An S-group has no bond crossing its bracket at all, so the converter "
+     "cannot tell where the repeat unit connects. A missing `M  SBL` line "
+     "alone does not land here: those are filled in from the S-group's atoms "
+     "before conversion."),
     ("branched_repeat_unit",
      "An SRU bracket is crossed by more than two bonds: a branched or network "
-     "repeat unit, which the converter cannot express."),
+     "repeat unit. Not enough on its own to fail -- 10 ground truths with "
+     "such an SRU convert, as do the 12 branched MT ones once their crossing "
+     "bonds are filled in -- so these fail for a further reason not yet "
+     "identified."),
     ("overlapping_sgroups",
      "Two S-groups share atoms without one containing the other. Not always "
      "fatal: 3 usable ground truths have overlapping S-groups too (see the "
@@ -248,7 +253,10 @@ def classify_conversion(molblock: str) -> str:
     if has_merged_bond_fields(molblock):
         return "100_or_more_atoms"
 
-    profile = sgroup_profile(molblock)
+    # Judge the S-groups as the server receives them: missing SBL lines are
+    # filled in first, so only an S-group with no crossing bond at all is
+    # left without one.
+    profile = sgroup_profile(fill_missing_crossing_bonds(molblock))
     if profile["no_crossing_bonds"]:
         return "sru_without_crossing_bonds"
     if profile["branched"]:
