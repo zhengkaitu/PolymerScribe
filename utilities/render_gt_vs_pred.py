@@ -48,6 +48,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem.Draw import rdMolDraw2D
 
 from evaluate import compare_molblocks
+from utilities.canonical_bigsmiles_api import VALID_STATUSES
 from utilities.paths import (
     gt_molfile_for_image,
     gt_tsv_key,
@@ -70,8 +71,6 @@ GROUP_SGROUP_LABEL = "sgroup_label"
 GROUP_SGROUP_GEOMETRY = "sgroup_geometry"
 GROUP_SKELETON = "skeleton_error"
 GROUP_UNPARSEABLE = "unparseable"
-
-VALID_STATUSES = ("SUCCESS", "NOOP")
 
 # A landscape canvas, because these are polymer backbones: nearly all of them
 # are far wider than they are tall, and a square canvas scales them down to fit

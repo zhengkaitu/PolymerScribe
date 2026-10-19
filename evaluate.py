@@ -14,6 +14,7 @@ from utilities.canonical_bigsmiles_api import (
     FIELDNAMES,
     STATUS_BIGSMILES_FAILED,
     STATUS_SUCCESS,
+    VALID_STATUSES,
     ServerUnavailableError,
     add_server_args,
     api_from_args,
@@ -48,7 +49,8 @@ def get_args():
                         default="data/PolymerLit/canonical_bigsmiles.tsv")
     parser.add_argument("--data_root", type=str, default="data/PolymerLit",
                         help="only used to key into --gt_canonical_tsv")
-    parser.add_argument("--gt_status_valid", type=str, default="SUCCESS,NOOP",
+    parser.add_argument("--gt_status_valid", type=str,
+                        default=",".join(sorted(VALID_STATUSES)),
                         help="ground-truth statuses whose canonical BigSMILES "
                              "is usable; anything else counts as a non-match")
     parser.add_argument("--pred_canonical_tsv", type=str, default=None,
